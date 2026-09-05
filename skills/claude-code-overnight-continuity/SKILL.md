@@ -43,10 +43,10 @@ Each layer covers a failure the others miss. Use all four.
    generalised to arbitrary jobs. If you are already running `brain`, reuse its plist
    conventions rather than inventing a third scheme.
 
-   the layer the other three cannot provide: it relaunches the *agent itself* when the Claude session dies (usage
-   limit, crash, closed terminal). A launchd agent runs it every 600 s; for each job spec it
-   fires `claude -p <prompt>` in that job's cwd only when the job is unfinished **and** no
-   claude process is already working there.
+   This is the layer the other three cannot provide: it relaunches the *agent itself* when
+   the Claude session dies (usage limit, crash, closed terminal). A launchd agent runs it
+   every 600 s; for each job spec it fires `claude -p <prompt>` in that job's cwd only when
+   the job is unfinished **and** no claude process is already working there.
 
 ```bash
 skills/claude-code-overnight-continuity/tools/install.sh          # load the launchd agent
