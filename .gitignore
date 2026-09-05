@@ -6,3 +6,7 @@ dist/
 build/
 *.egg-info/
 .venv/
+
+# OMC operational state (per the .omc worktree rule)
+.omc/
+!.omc/skills/
