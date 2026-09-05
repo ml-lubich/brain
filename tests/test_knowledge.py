@@ -196,3 +196,34 @@ def test_watchdog_check_never_mutates(tmp_path, monkeypatch):
     before = config.HEARTBEAT.read_text()
     watchdog.check()
     assert config.HEARTBEAT.read_text() == before
+
+
+def test_overnight_sleep_is_not_treated_as_a_stall(tmp_path, monkeypatch):
+    """launchd suspends StartInterval jobs while the Mac sleeps, so every
+    morning the heartbeat looks hours old. Recovering from that would burn a
+    breaker attempt daily for a system that is working perfectly."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import watchdog, config
+    watchdog.mark_run()
+    config.HEARTBEAT.write_text(str(int(time.time()) - 8 * 3600))
+
+    # watchdog also last ran 8h ago -> the machine was asleep, not stuck
+    watchdog._path(watchdog.LASTRUN).write_text(str(int(time.time()) - 8 * 3600))
+    assert watchdog.slept() is True
+
+    # watchdog ran 30s ago while the tick did not -> a genuine stall
+    watchdog._path(watchdog.LASTRUN).write_text(str(int(time.time()) - 30))
+    assert watchdog.slept() is False
+
+
+def test_sleep_path_records_no_breaker_attempt(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import watchdog, config, service
+    # Pretend every job is loaded, so the test does not depend on whether this
+    # particular machine happens to have them installed.
+    monkeypatch.setattr(service, "loaded", lambda: list(service.ALL))
+    config.HEARTBEAT.write_text(str(int(time.time()) - 8 * 3600))
+    watchdog._path(watchdog.LASTRUN).write_text(str(int(time.time()) - 8 * 3600))
+    actions = watchdog.run()
+    assert any("resumed after" in a for a in actions)
+    assert watchdog.breaker_state() == (False, 0)   # nothing spent

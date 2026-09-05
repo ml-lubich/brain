@@ -36,6 +36,7 @@ BREAKER_WINDOW = 6 * 3600  # seconds
 
 PIDFILE = "tick.pid"
 BREAKER = "breaker.json"
+LASTRUN = "watchdog.last"
 
 
 def _path(name: str) -> Path:
@@ -61,6 +62,39 @@ def heartbeat_age() -> float | None:
 
 def stale_after() -> int:
     return config.POLL_SECONDS * STALE_MULTIPLIER
+
+
+def watchdog_interval() -> int:
+    """Mirrors what service.install() writes for the watchdog job."""
+    return max(120, config.POLL_SECONDS // 2)
+
+
+def _last_run_age() -> float | None:
+    path = _path(LASTRUN)
+    if not path.exists():
+        return None
+    try:
+        return time.time() - float(path.read_text().strip())
+    except ValueError:
+        return None
+
+
+def mark_run() -> None:
+    _path(LASTRUN).write_text(str(int(time.time())))
+
+
+def slept() -> bool:
+    """True when the Mac was asleep or off rather than the tick being stuck.
+
+    launchd suspends StartInterval jobs during sleep, so after an overnight the
+    heartbeat looks hours old — but so does the watchdog's own last run. A real
+    stall looks different: the watchdog kept firing on schedule while the tick
+    did not. Comparing the two is what tells them apart, with no pmset parsing.
+    """
+    gap = _last_run_age()
+    if gap is None:
+        return False          # first ever run: judge on the heartbeat alone
+    return gap > watchdog_interval() * 2
 
 
 def record_child(pid: int) -> None:
@@ -196,6 +230,18 @@ def run() -> list[str]:
     config.ensure_dirs()
     state = check()
     actions: list[str] = []
+    was_asleep = slept()
+    mark_run()
+
+    if was_asleep and state["stale"] and not state["jobs_missing"]:
+        # The machine was suspended. Everything is stale, nothing is broken.
+        # Let the next scheduled tick catch up on its own.
+        actions.append(
+            f"resumed after a {_fmt(_last_run_age() or 0)} gap (sleep/shutdown) — "
+            "not treating a stale heartbeat as a stall"
+        )
+        _log(actions)
+        return actions
 
     if state["hung_child"]:
         pid, age = state["hung_child"]
