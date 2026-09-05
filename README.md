@@ -103,6 +103,11 @@ Env overrides: `BRAIN_HOME`, `BRAIN_POLL_SECONDS`, `BRAIN_DIGEST_HOUR`,
 uv run --with pytest --with typer --with rich python -m pytest tests/ -q
 ```
 
+## Skills
+
+Reusable agent playbooks live in [`skills/`](skills/README.md) — the same launchd-wakes-a-
+headless-Claude pattern this repo runs on, generalised for other long unattended jobs.
+
 ## License
 
 MIT
