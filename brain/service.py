@@ -12,6 +12,9 @@ from . import config
 AGENTS = Path.home() / "Library" / "LaunchAgents"
 TICK = "com.mlubich.brain"
 DIGEST = "com.mlubich.brain-digest"
+WATCH = "com.mlubich.brain-watchdog"
+SYNC = "com.mlubich.brain-sync"
+ALL = (TICK, DIGEST, WATCH, SYNC)
 
 # launchd hands jobs a minimal PATH, so it must be stated explicitly or every
 # CLI the channels shell out to silently vanishes.
@@ -69,12 +72,17 @@ def install(poll: int | None = None, hour: int | None = None) -> list[str]:
     config.ensure_dirs()
     poll = poll or config.POLL_SECONDS
     hour = config.DIGEST_HOUR if hour is None else hour
+    # The watchdog runs on its own timer, deliberately offset from the tick so a
+    # single wedged process cannot take both down.
     plists = [
         _write(TICK, "tick", f"<key>StartInterval</key><integer>{poll}</integer>"),
         _write(DIGEST, "digest",
                "<key>StartCalendarInterval</key><dict>"
                f"<key>Hour</key><integer>{hour}</integer>"
                "<key>Minute</key><integer>0</integer></dict>"),
+        _write(WATCH, "watchdog",
+               f"<key>StartInterval</key><integer>{max(120, poll // 2)}</integer>"),
+        _write(SYNC, "sync", f"<key>StartInterval</key><integer>{max(900, poll * 3)}</integer>"),
     ]
     uid = os.getuid()
     results = []
@@ -88,7 +96,7 @@ def install(poll: int | None = None, hour: int | None = None) -> list[str]:
 def uninstall() -> list[str]:
     uid = os.getuid()
     results = []
-    for label in (TICK, DIGEST):
+    for label in ALL:
         code, out = _launchctl("bootout", f"gui/{uid}/{label}")
         results.append(f"{label}: {'unloaded' if code == 0 else 'was not loaded'}")
         (AGENTS / f"{label}.plist").unlink(missing_ok=True)
@@ -98,4 +106,4 @@ def uninstall() -> list[str]:
 def loaded() -> list[str]:
     _, out = _launchctl("list")
     return [line.split()[-1] for line in out.splitlines()
-            if line.strip().endswith((TICK, DIGEST))]
+            if line.strip().endswith(ALL)]

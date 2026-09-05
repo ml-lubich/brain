@@ -1,0 +1,246 @@
+"""Keeps the agent alive without ever destroying anything.
+
+Two rules shape every line here:
+
+1. **Surgical kills only.** This Mac runs many interactive `claude` sessions.
+   The watchdog will only ever signal a PID that a brain tick itself recorded in
+   `tick.pid`, and only after confirming that PID is still the same `claude -p`
+   child. It never pattern-matches its way to a kill. Killing the user's live
+   session because it "looked stale" is the failure mode that matters most.
+
+2. **A circuit breaker, not a restart loop.** A permanently broken job restarted
+   every 5 minutes burns API quota and achieves nothing. After a small number of
+   attempts the watchdog stops acting and only reports.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+from . import config, notify, service
+
+# tick runs every POLL_SECONDS; treat it as stalled only after several missed
+# cycles so a slow Claude call or a sleeping Mac never trips it.
+STALE_MULTIPLIER = 3
+# claude -p is given 900s inside agent.invoke; allow generous headroom past that
+# before considering the child hung.
+CHILD_HUNG_SECONDS = 1200
+MAX_ATTEMPTS = 3          # per window, then alert-only
+BREAKER_WINDOW = 6 * 3600  # seconds
+
+PIDFILE = "tick.pid"
+BREAKER = "breaker.json"
+
+
+def _path(name: str) -> Path:
+    return config.DIR / name
+
+
+def beat() -> None:
+    """Called by every tick, including the ones that decide to do nothing.
+    A tick that correctly skips is still a healthy tick."""
+    config.ensure_dirs()
+    config.HEARTBEAT.write_text(str(int(time.time())))
+
+
+def heartbeat_age() -> float | None:
+    """Seconds since the last tick, or None if it has never run."""
+    if not config.HEARTBEAT.exists():
+        return None
+    try:
+        return time.time() - float(config.HEARTBEAT.read_text().strip())
+    except ValueError:
+        return None
+
+
+def stale_after() -> int:
+    return config.POLL_SECONDS * STALE_MULTIPLIER
+
+
+def record_child(pid: int) -> None:
+    _path(PIDFILE).write_text(json.dumps({"pid": pid, "started": int(time.time())}))
+
+
+def clear_child() -> None:
+    _path(PIDFILE).unlink(missing_ok=True)
+
+
+def _proc_cmdline(pid: int) -> str:
+    proc = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                          capture_output=True, text=True, check=False, timeout=15)
+    return proc.stdout.strip()
+
+
+def hung_child() -> tuple[int, int] | None:
+    """(pid, age) of a recorded claude child that has outlived its timeout.
+
+    Every guard here exists to make certain we cannot hit an interactive session:
+    the PID must be one we recorded, still alive, still a `claude` process, and
+    still running with `-p` (headless). Any doubt returns None.
+    """
+    pidfile = _path(PIDFILE)
+    if not pidfile.exists():
+        return None
+    try:
+        data = json.loads(pidfile.read_text())
+        pid, started = int(data["pid"]), int(data["started"])
+    except (ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+    age = int(time.time() - started)
+    if age < CHILD_HUNG_SECONDS:
+        return None
+
+    cmd = _proc_cmdline(pid)
+    if not cmd:
+        clear_child()  # already gone
+        return None
+    if "claude" not in cmd or " -p" not in f" {cmd}":
+        # PID was recycled onto something else. Never signal it.
+        clear_child()
+        return None
+    return pid, age
+
+
+def terminate_child(pid: int, grace: int = 20) -> str:
+    """SIGTERM, wait, then SIGKILL. Only ever the recorded headless child."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        clear_child()
+        return "child already gone"
+    except PermissionError:
+        return f"cannot signal pid {pid} (permission)"
+
+    for _ in range(grace):
+        time.sleep(1)
+        if not _proc_cmdline(pid):
+            clear_child()
+            return f"terminated pid {pid} gracefully"
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    clear_child()
+    return f"killed pid {pid} after {grace}s grace"
+
+
+def _breaker() -> dict:
+    path = _path(BREAKER)
+    if not path.exists():
+        return {"attempts": [], "opened": None}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {"attempts": [], "opened": None}
+
+
+def _save_breaker(state: dict) -> None:
+    _path(BREAKER).write_text(json.dumps(state))
+
+
+def breaker_state() -> tuple[bool, int]:
+    """(open, recent_attempts). Open means: stop acting, only report."""
+    state = _breaker()
+    now = time.time()
+    recent = [t for t in state.get("attempts", []) if now - t < BREAKER_WINDOW]
+    if recent != state.get("attempts"):
+        state["attempts"] = recent
+        _save_breaker(state)
+    return len(recent) >= MAX_ATTEMPTS, len(recent)
+
+
+def record_attempt() -> None:
+    state = _breaker()
+    state.setdefault("attempts", []).append(time.time())
+    _save_breaker(state)
+
+
+def reset_breaker() -> None:
+    _save_breaker({"attempts": [], "opened": None})
+
+
+def check() -> dict:
+    """Full health read. Never changes anything."""
+    age = heartbeat_age()
+    loaded = service.loaded()
+    is_open, attempts = breaker_state()
+    hung = hung_child()
+    return {
+        "heartbeat_age": age,
+        "stale": age is None or age > stale_after(),
+        "stale_after": stale_after(),
+        "jobs_loaded": loaded,
+        "jobs_missing": [l for l in (service.TICK, service.DIGEST) if l not in loaded],
+        "hung_child": hung,
+        "breaker_open": is_open,
+        "attempts": attempts,
+    }
+
+
+def run() -> list[str]:
+    """One watchdog pass. Returns what it did, in order.
+
+    Recovery ladder, non-destructive at every rung:
+      1. hung headless child      -> SIGTERM, then SIGKILL after grace
+      2. launchd job not loaded   -> reload it
+      3. loaded but heartbeat stale -> kick one tick by hand
+      4. breaker open             -> do nothing, alert only
+    """
+    config.ensure_dirs()
+    state = check()
+    actions: list[str] = []
+
+    if state["hung_child"]:
+        pid, age = state["hung_child"]
+        actions.append(f"hung claude child pid {pid} ({age}s) -> {terminate_child(pid)}")
+
+    if state["jobs_missing"]:
+        if state["breaker_open"]:
+            actions.append(f"jobs missing {state['jobs_missing']} but breaker OPEN — not reloading")
+        else:
+            record_attempt()
+            actions += [f"reload: {line}" for line in service.install()]
+
+    elif state["stale"]:
+        if state["breaker_open"]:
+            actions.append(
+                f"heartbeat stale ({_fmt(state['heartbeat_age'])}) but breaker OPEN "
+                f"after {state['attempts']} attempts — alerting only"
+            )
+        else:
+            record_attempt()
+            actions.append(f"heartbeat stale ({_fmt(state['heartbeat_age'])}) -> kicking a tick")
+            subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{service.TICK}"],
+                           capture_output=True, check=False, timeout=30)
+    else:
+        actions.append(f"healthy (last tick {_fmt(state['heartbeat_age'])} ago)")
+
+    acted = any(not a.startswith("healthy") for a in actions)
+    if acted:
+        _log(actions)
+        notify.send("brain watchdog", actions[0][:180])
+    return actions
+
+
+def _fmt(seconds: float | None) -> str:
+    if seconds is None:
+        return "never"
+    if seconds < 90:
+        return f"{int(seconds)}s"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _log(actions: list[str]) -> None:
+    stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with config.LOG.open("a") as fh:
+        for action in actions:
+            fh.write(f"{stamp} watchdog: {action}\n")

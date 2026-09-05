@@ -13,6 +13,8 @@ QUEUE = DIR / "queue.jsonl"
 CONTEXT = DIR / "context.md"
 STATE = DIR / "state"
 LOG = DIR / "brain.log"
+HEARTBEAT = DIR / "heartbeat"
+KNOWLEDGE = Path(os.environ.get("BRAIN_KNOWLEDGE", DIR / "knowledge"))
 DIGEST = DIR / "digest.txt"
 
 TODO = Path(os.environ.get("AGENT_TODO", HOME / ".config" / "agent-todo" / "TODO.md"))

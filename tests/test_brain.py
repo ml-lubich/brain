@@ -90,3 +90,74 @@ def test_broken_channel_does_not_kill_the_snapshot(tmp_path, monkeypatch):
 
     section = Exploding().section()
     assert "snapshot failed" in section and "kaboom" in section
+
+
+# --- github channel ---------------------------------------------------------
+# Code review requests and red CI are the other thing on this Mac that waits on
+# a human. Read-only: a channel that could merge or comment on Misha's behalf is
+# a different risk class from drafting a reply.
+
+
+def test_github_channel_is_discovered_and_cannot_send(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import all_channels
+
+    found = all_channels()
+    assert "gh" in found
+    assert found["gh"].sendable is False
+
+
+def test_github_snapshot_asks_for_review_requests_and_own_prs(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import github as gh_mod
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(gh_mod, "run", lambda cmd, timeout=30: (calls.append(cmd), "")[1])
+
+    gh_mod.GitHub().snapshot()
+
+    flat = [" ".join(c) for c in calls]
+    assert any("--review-requested=@me" in f for f in flat), "must surface review requests"
+    assert any("--author=@me" in f for f in flat), "must surface his own open PRs"
+    assert all(c[0] == "gh" for c in calls)
+
+
+def test_github_channel_refuses_to_send(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels.github import GitHub
+    import pytest as _pytest
+
+    with _pytest.raises(NotImplementedError):
+        GitHub().send("someone", "hi")
+
+
+def test_github_reports_unauthenticated_rather_than_failing_the_tick(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import github as gh_mod
+
+    monkeypatch.setattr(gh_mod.shutil, "which", lambda _b: "/usr/bin/gh")
+    monkeypatch.setattr(gh_mod, "run", lambda cmd, timeout=30: "You are not logged into any GitHub hosts")
+    ok, why = gh_mod.GitHub().available()
+    assert ok is False
+    assert "gh auth login" in why
+
+
+def test_read_only_channels_do_not_claim_to_deliver_mail_drafts(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import all_channels
+    from brain.main import _delivery
+
+    found = all_channels()
+    assert _delivery(found["gh"]) == "read-only"
+    assert _delivery(found["mail"]) == "Mail.app drafts"
+    assert _delivery(found["imsg"]) == "brain approve"
+
+
+def test_cli_still_exposes_its_commands(tmp_path, monkeypatch):
+    # A helper accidentally inserted between @app.command() and its function
+    # silently unregistered `channels` while every other test stayed green.
+    _isolate(tmp_path, monkeypatch)
+    from brain.main import app
+
+    registered = {c.callback.__name__ for c in app.registered_commands}
+    assert {"channels", "doctor", "tick", "approve"} <= registered

@@ -139,13 +139,20 @@ def doctor() -> None:
     raise typer.Exit(1 if bad else 0)
 
 
+def _delivery(ch) -> str:
+    """How an approved item for this channel actually reaches its recipient."""
+    if ch.sendable:
+        return "brain approve"
+    return "Mail.app drafts" if ch.name == "mail" else "read-only"
+
+
 @app.command()
 def channels() -> None:
     """List discovered channels. Add one by dropping a module in brain/channels/."""
     table = Table("name", "label", "sends via")
     for name, ch in all_channels().items():
         table.add_row(name, ch.label,
-                      "brain approve" if ch.sendable else "Mail.app drafts")
+                      _delivery(ch))
     console.print(table)
 
 

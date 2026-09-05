@@ -108,19 +108,33 @@ def build_prompt() -> str:
 
 
 def invoke(timeout: int = 900) -> str:
-    """Run claude -p with the send tools removed. Returns its trailing output."""
+    """Run claude -p with the send tools removed. Returns its trailing output.
+
+    The child PID is recorded so the watchdog can kill THIS process and only
+    this one — never an interactive claude session the user is sitting in.
+    """
+    from . import watchdog  # local import: watchdog imports service, service imports config
+
     cmd = ["claude", "-p", build_prompt(), "--allowedTools", *ALLOWED,
            "--disallowedTools", *FORBIDDEN]
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-            check=False, cwd=str(config.HOME),
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, cwd=str(config.HOME),
         )
     except FileNotFoundError:
         return "claude CLI not found on PATH"
+
+    watchdog.record_child(proc.pid)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
         return f"claude timed out after {timeout}s"
-    return (proc.stdout + proc.stderr).strip()
+    finally:
+        watchdog.clear_child()
+    return (out or "").strip()
 
 
 def digest(timeout: int = 600) -> str:
