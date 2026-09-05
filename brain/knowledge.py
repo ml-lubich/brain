@@ -181,14 +181,14 @@ def recall(query: str, limit: int = 10) -> list[tuple[str, str, str]]:
     con = connect()
     try:
         rows = con.execute(
-            "SELECT title, snippet(notes, 3, '[', ']', ' … ', 18), path "
+            "SELECT title, snippet(notes, 3, '«', '»', ' … ', 18), path "
             "FROM notes WHERE notes MATCH ? ORDER BY rank LIMIT ?",
             (query, limit),
         ).fetchall()
     except sqlite3.OperationalError:
         # A bare word with FTS syntax chars in it — quote and retry.
         rows = con.execute(
-            "SELECT title, snippet(notes, 3, '[', ']', ' … ', 18), path "
+            "SELECT title, snippet(notes, 3, '«', '»', ' … ', 18), path "
             "FROM notes WHERE notes MATCH ? ORDER BY rank LIMIT ?",
             ('"' + query.replace('"', "") + '"', limit),
         ).fetchall()

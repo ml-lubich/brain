@@ -150,9 +150,15 @@ def sync(message: str = "") -> list[str]:
 def status() -> dict[str, str]:
     if not is_repo():
         return {"repo": "not initialised"}
-    _, branch = git("rev-parse", "--abbrev-ref", "HEAD")
-    _, count = git("rev-list", "--count", "HEAD")
-    _, remote = git("remote", "get-url", "origin")
+    code, branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if code != 0:
+        branch = "main"
+    code, count = git("rev-list", "--count", "HEAD")
+    if code != 0:
+        count = "0"          # a fresh repo with no commits is not an error
+    code, remote = git("remote", "get-url", "origin")
+    if code != 0:
+        remote = ""
     ahead = behind = "?"
     if has_remote():
         code, out = git("rev-list", "--left-right", "--count", "origin/main...HEAD")

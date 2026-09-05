@@ -6,7 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from . import agent, config, notify, queue, service
+from . import agent, config, knowledge, notify, queue, service, sync as gitsync, watchdog
 from .channels import all_channels, get
 
 app = typer.Typer(
@@ -30,6 +30,7 @@ def tick(
     dry: bool = typer.Option(False, "--dry", "-n", help="Build the snapshot, but never invoke Claude."),
 ) -> None:
     """One poll cycle. This is what launchd runs."""
+    watchdog.beat()   # a tick that correctly does nothing is still a healthy tick
     doc = agent.snapshot()
     if dry:
         console.print(doc)
@@ -117,7 +118,14 @@ def status() -> None:
     table.add_row("last tick", _last_log() or "never")
     table.add_row("queued", str(queue.count()))
     table.add_row("channels", ", ".join(all_channels()))
-    table.add_row("launchd", f"{len(live)}/2 loaded" + (f" ({', '.join(live)})" if live else ""))
+    table.add_row("launchd", f"{len(live)}/{len(service.ALL)} loaded"
+                  + (f" ({', '.join(l.split('.')[-1] for l in live)})" if live else ""))
+    table.add_row("heartbeat", watchdog._fmt(watchdog.heartbeat_age()) + " ago")
+    ks = knowledge.stats()
+    table.add_row("knowledge", f"{ks['notes']} notes, indexed {ks['indexed']}")
+    gs = gitsync.status()
+    table.add_row("sync", gs.get("repo", "?") if gs.get("repo") == "not initialised"
+                  else f"{gs['commits']} commits, ahead {gs['ahead']} behind {gs['behind']}, dirty {gs['dirty']}")
     table.add_row("notify", notify.configured())
     table.add_row("config", str(config.DIR))
     console.print(table)
@@ -205,3 +213,123 @@ def _last_log() -> str:
 
 if __name__ == "__main__":
     app()
+
+
+# ---------------------------------------------------------------- knowledge
+
+@app.command()
+def learn(
+    text: str = typer.Argument(..., help="The fact to remember."),
+    title: str = typer.Option("", "--title", "-t", help="Note title. Defaults to the first words."),
+    tags: str = typer.Option("", "--tags", help="Comma-separated tags."),
+    append: bool = typer.Option(False, "--append", "-a", help="Append to an existing note of the same title."),
+    push: bool = typer.Option(False, "--push", "-p", help="Sync to the remote straight after."),
+) -> None:
+    """Record something worth keeping. Deduplicates; never overwrites a note."""
+    path, action = knowledge.learn(
+        text, title=title,
+        tags=[t.strip() for t in tags.split(",") if t.strip()],
+        append=append,
+    )
+    colour = {"created": "green", "appended": "cyan", "duplicate": "yellow"}[action]
+    console.print(f"[{colour}]{action}[/{colour}] {path}")
+    if push:
+        for line in gitsync.sync(f"learn: {title or text[:50]}"):
+            console.print(f"  {line}")
+
+
+@app.command()
+def recall(
+    query: str = typer.Argument(..., help="Full-text search over everything learned."),
+    limit: int = typer.Option(10, "--limit", "-n"),
+) -> None:
+    """Search the knowledge index."""
+    rows = knowledge.recall(query, limit)
+    if not rows:
+        console.print(f"[dim]nothing for {query!r} ({knowledge.stats()['notes']} notes indexed)[/dim]")
+        return
+    for title, snippet, path in rows:
+        console.print(f"[bold]{title}[/bold]\n  {snippet}\n  [dim]{path}[/dim]\n")
+
+
+@app.command()
+def reindex() -> None:
+    """Rebuild the search index from the markdown. Safe — notes are untouched."""
+    console.print(f"indexed [green]{knowledge.reindex()}[/green] notes")
+
+
+@app.command("sync")
+def sync_cmd(
+    message: str = typer.Option("", "--message", "-m", help="Commit message."),
+) -> None:
+    """Pull, commit, push the knowledge repo. Never force-pushes, never discards."""
+    for line in gitsync.sync(message):
+        style = "red" if ("CONFLICT" in line or "failed" in line) else "dim"
+        console.print(f"[{style}]{line}[/{style}]")
+
+
+@app.command("knowledge")
+def knowledge_cmd(
+    init_remote: str = typer.Option("", "--init", help="Create the repo, optionally with this git remote URL."),
+) -> None:
+    """Show or initialise the knowledge store."""
+    if init_remote or not gitsync.is_repo():
+        for line in gitsync.init(init_remote if init_remote != "-" else ""):
+            console.print(line)
+        knowledge.reindex()
+    table = Table(show_header=False, box=None)
+    for key, value in {**knowledge.stats(), **gitsync.status()}.items():
+        table.add_row(key, str(value))
+    console.print(table)
+
+
+# ---------------------------------------------------------------- resilience
+
+@app.command("watchdog")
+def watchdog_cmd(
+    check_only: bool = typer.Option(False, "--check", "-c", help="Report only; change nothing."),
+    reset: bool = typer.Option(False, "--reset", help="Clear the circuit breaker."),
+) -> None:
+    """Detect a stalled agent and recover it. Non-destructive at every step."""
+    if reset:
+        watchdog.reset_breaker()
+        console.print("[green]breaker reset[/green]")
+        return
+    if check_only:
+        for key, value in watchdog.check().items():
+            console.print(f"{key}: {value}")
+        return
+    for line in watchdog.run():
+        style = "green" if line.startswith("healthy") else "yellow"
+        console.print(f"[{style}]{line}[/{style}]")
+
+
+@app.command()
+def health() -> None:
+    """Whole-system view: jobs, heartbeat, channels, knowledge, breaker."""
+    state = watchdog.check()
+    table = Table("check", "state", "detail")
+
+    def row(name, ok, detail):
+        table.add_row(name, "[green]ok[/green]" if ok else "[red]FAIL[/red]", detail)
+
+    live = service.loaded()
+    row("launchd jobs", not state["jobs_missing"],
+        f"{len(live)}/{len(service.ALL)} loaded" +
+        (f" · missing {', '.join(state['jobs_missing'])}" if state["jobs_missing"] else ""))
+    row("heartbeat", not state["stale"],
+        f"{watchdog._fmt(state['heartbeat_age'])} ago (stale after {state['stale_after']}s)")
+    row("hung child", not state["hung_child"],
+        str(state["hung_child"]) if state["hung_child"] else "none")
+    row("breaker", not state["breaker_open"],
+        f"{state['attempts']} attempts in window" + (" — OPEN" if state["breaker_open"] else ""))
+    for name, ch in all_channels().items():
+        ok, why = ch.available()
+        row(f"channel {name}", ok, why)
+    ks = knowledge.stats()
+    row("knowledge", True, f"{ks['notes']} notes · indexed {ks['indexed']}")
+    gs = gitsync.status()
+    row("knowledge sync", gs.get("repo") != "not initialised",
+        f"ahead {gs.get('ahead','?')} behind {gs.get('behind','?')} dirty {gs.get('dirty','?')}"
+        if gs.get("repo") != "not initialised" else "not initialised")
+    console.print(table)
