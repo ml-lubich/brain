@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mac-brain"
+version = "0.1.0"
+description = "brain — always-on inbox agent. Wakes headless Claude when a channel changes, drafts replies, queues them for approval. Never sends."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ml-lubich" }]
+keywords = ["agent", "claude", "macos", "cli", "email", "imessage", "whatsapp", "launchd"]
+classifiers = [
+    "Environment :: MacOS X",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/ml-lubich/brain"
+Repository = "https://github.com/ml-lubich/brain"
+
+[project.scripts]
+brain = "brain.main:app"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+
+[tool.pytest.ini_options]
+addopts = "--cov=brain --cov-report=term-missing"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["brain"]

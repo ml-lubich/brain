@@ -1,0 +1,92 @@
+"""The checks that fail if the logic breaks. No fixtures, no ceremony."""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _isolate(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+    for mod in [m for m in list(sys.modules) if m.startswith("brain")]:
+        del sys.modules[mod]
+    from brain import config
+    config.ensure_dirs()
+    return config
+
+
+def test_fingerprint_ignores_the_timestamp_line(tmp_path, monkeypatch):
+    """The whole token-saving gate rests on this: same inbox, different clock,
+    same fingerprint. If this breaks, every tick invokes Claude."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import agent
+    a = "# Inbox snapshot 2026-09-04 10:00:00\n\n## Email\nhello"
+    b = "# Inbox snapshot 2026-09-04 23:59:59\n\n## Email\nhello"
+    c = "# Inbox snapshot 2026-09-04 10:00:00\n\n## Email\nsomething new"
+    assert agent.fingerprint(a) == agent.fingerprint(b)
+    assert agent.fingerprint(a) != agent.fingerprint(c)
+
+
+def test_changed_is_true_once_then_false(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import agent
+    doc = "# Inbox snapshot X\n\nbody"
+    assert agent.changed(doc) is True
+    assert agent.changed(doc) is False
+    assert agent.changed("# Inbox snapshot X\n\ndifferent") is True
+
+
+def test_queue_roundtrip_and_1_based_pop(tmp_path, monkeypatch):
+    config = _isolate(tmp_path, monkeypatch)
+    from brain import queue
+    for i in range(3):
+        queue.add(queue.Proposal(ch="imsg", to=f"+1555000000{i}", re="hi", msg=f"m{i}"))
+    assert queue.count() == 3
+    assert queue.pop(2).msg == "m1"           # 1-based, middle removal
+    assert [p.msg for p in queue.load()] == ["m0", "m2"]
+    try:
+        queue.pop(9)
+        raise AssertionError("expected IndexError")
+    except IndexError:
+        pass
+
+
+def test_queue_survives_a_malformed_line(tmp_path, monkeypatch):
+    config = _isolate(tmp_path, monkeypatch)
+    from brain import queue
+    config.QUEUE.write_text(
+        '{"ch":"wa","to":"a","msg":"good"}\nNOT JSON\n{"ch":"imsg","to":"b","msg":"also good"}\n'
+    )
+    assert [p.msg for p in queue.load()] == ["good", "also good"]
+
+
+def test_send_tools_are_forbidden(tmp_path, monkeypatch):
+    """The only thing preventing unattended sends. Never let this regress."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import agent
+    for tool in ("Bash(imail send:*)", "Bash(imsg send:*)", "Bash(wa send:*)"):
+        assert tool in agent.FORBIDDEN
+        assert tool not in agent.ALLOWED
+    assert not any("send" in t for t in agent.ALLOWED)
+
+
+def test_channels_are_discovered_without_registration(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import all_channels
+    found = all_channels()
+    assert {"mail", "imsg", "wa"} <= set(found)
+    assert found["mail"].sendable is False   # email approval is Mail.app drafts
+    assert found["imsg"].sendable is True
+
+
+def test_broken_channel_does_not_kill_the_snapshot(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels.base import Channel
+
+    class Exploding(Channel):
+        name, label = "boom", "Exploding"
+        def snapshot(self): raise RuntimeError("kaboom")
+
+    section = Exploding().section()
+    assert "snapshot failed" in section and "kaboom" in section
