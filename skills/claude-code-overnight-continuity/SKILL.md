@@ -82,6 +82,13 @@ done marker.
 - **Recycle the process periodically.** Some native stores never release virtual address
   space (Kuzu's vmem allocator, for one). Exiting with a "more work remains" code and letting
   the supervisor relaunch resets it for free.
+- **launchd cannot exec anything under ~/Desktop, ~/Documents or ~/Downloads.** macOS TCC
+  denies it and every tick exits 126 "Operation not permitted" — and a dead agent looks
+  exactly like an idle one, so it fails silently. Install the runner under
+  `~/.claude-keepalive/bin/` and point the plist there. After installing, do not trust a
+  manual run: check `launchctl print gui/$(id -u)/<label> | grep "last exit code"` and
+  confirm a fresh line in the log. A keepalive you believe in but never verified is worse
+  than none, because you stop watching the thing it was supposed to watch.
 - **Watch your own load.** Fanning out subagents while the supervised job is running starves
   it. Load average 69 on a laptop means the batch you are babysitting is the thing you
   starved. Cap concurrency, or stagger the audit work.
