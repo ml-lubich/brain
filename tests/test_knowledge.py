@@ -44,15 +44,19 @@ def test_identical_content_is_a_duplicate_not_a_new_note(tmp_path, monkeypatch):
     assert len(knowledge.all_notes()) == 1
 
 
-def test_same_title_different_content_never_clobbers(tmp_path, monkeypatch):
+def test_without_git_history_a_same_title_write_forks_instead_of_overwriting(
+        tmp_path, monkeypatch):
+    """Edit-in-place is only safe because git holds the previous version. With
+    no repo there is no archive, so the old text must never be overwritten."""
     _isolate(tmp_path, monkeypatch)
-    from brain import knowledge
+    from brain import knowledge, sync
+    assert not sync.is_repo()             # no archive available
     p1, _ = knowledge.learn("first version of the fact", title="Topic")
-    p2, action = knowledge.learn("a genuinely different fact", title="Topic")
+    p2, action = knowledge.learn("a genuinely different claim about lume vms",
+                                 title="Topic", force=True)
     assert action == "created"
-    assert p1 != p2                       # kept side by side
-    assert p1.exists() and p2.exists()    # the original survived
-    assert len(knowledge.all_notes()) == 2
+    assert p1 != p2 and p1.exists() and p2.exists()
+    assert "first version" in p1.read_text()
 
 
 def test_append_extends_rather_than_replaces(tmp_path, monkeypatch):
@@ -69,11 +73,12 @@ def test_reindex_rebuilds_from_markdown_only(tmp_path, monkeypatch):
     """The index is derived. Deleting it must lose nothing."""
     _isolate(tmp_path, monkeypatch)
     from brain import knowledge
-    knowledge.learn("fact one", title="One")
-    knowledge.learn("fact two", title="Two")
+    knowledge.learn("the ClickUp API rate limit is account-wide", title="One")
+    knowledge.learn("Lume VMs expose a daemon on port 7777", title="Two")
     knowledge.db_path().unlink()
     assert knowledge.reindex() == 2
-    assert knowledge.recall("fact")
+    assert knowledge.recall("clickup")
+    assert knowledge.recall("lume")
 
 
 def test_frontmatter_roundtrips(tmp_path, monkeypatch):
@@ -301,7 +306,8 @@ def test_same_title_edits_in_place_rather_than_forking(tmp_path, monkeypatch):
     """Two contradictory notes with no way to tell which is current is the
     failure this store exists to prevent. Git history is the archive."""
     _isolate(tmp_path, monkeypatch)
-    from brain import knowledge
+    from brain import knowledge, sync
+    sync.init()                       # history exists, so overwriting is safe
     p1, _ = knowledge.learn("the original claim", title="Topic")
     p2, action = knowledge.learn("a completely different claim about lume vms",
                                  title="Topic", force=True)

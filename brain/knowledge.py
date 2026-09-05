@@ -146,15 +146,16 @@ def find_duplicate(body: str) -> Note | None:
     return None
 
 
-def _preserve(path: Path) -> None:
-    """Commit a note before editing it, so the previous wording is recoverable.
-
-    This is what makes an in-place edit safe: git history becomes the archive,
-    rather than leaving two contradictory copies in the working tree.
+def _archived(path: Path) -> bool:
+    """Ensure the current text of `path` exists in git history, and say whether
+    it does. Overwriting is only safe once something else holds the old copy.
     """
     from . import sync as gitsync
-    if gitsync.is_repo() and gitsync.dirty():
+    if not gitsync.is_repo():
+        return False
+    if gitsync.dirty():
         gitsync.commit(f"snapshot before editing {path.name}")
+    return not gitsync.dirty()
 
 
 def learn(text: str, title: str = "", tags: list[str] | None = None,
@@ -181,13 +182,18 @@ def learn(text: str, title: str = "", tags: list[str] | None = None,
 
     if path.exists():
         note = parse(path)
-        _preserve(path)
-        note.body = f"{note.body}\n\n{text.strip()}" if append else text.strip()
-        note.tags = sorted(set(note.tags) | set(tags))
-        note.updated = _today()
-        path.write_text(note.render())
-        reindex()
-        return path, "appended" if append else "updated"
+        if not append and not _archived(path):
+            # No git history here, so an in-place edit would be the only copy.
+            # Fork instead: never overwrite text that nothing else preserves.
+            stamp = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+            path = notes_dir() / f"{slugify(title)}-{stamp}.md"
+        else:
+            note.body = f"{note.body}\n\n{text.strip()}" if append else text.strip()
+            note.tags = sorted(set(note.tags) | set(tags))
+            note.updated = _today()
+            path.write_text(note.render())
+            reindex()
+            return path, "appended" if append else "updated"
 
     path.write_text(Note(path.stem, title, tags, text, path, _today()).render())
     reindex()
