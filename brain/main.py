@@ -168,12 +168,23 @@ def channels() -> None:
 def install(
     poll: int = typer.Option(config.POLL_SECONDS, help="Seconds between ticks."),
     hour: int = typer.Option(config.DIGEST_HOUR, help="Hour (0-23) for the daily briefing."),
+    knowledge_remote: str = typer.Option("", "--knowledge-remote",
+                                         help="Git URL for the shared knowledge repo."),
 ) -> None:
-    """Write and load the launchd agents. Idempotent."""
+    """Set up everything and start it: config, knowledge store, launchd agents."""
     init(quiet=True)
+    if not gitsync.is_repo():
+        for line in gitsync.init(knowledge_remote):
+            console.print(f"[dim]{line}[/dim]")
+    elif knowledge_remote:
+        for line in gitsync.init(knowledge_remote):
+            console.print(f"[dim]{line}[/dim]")
+    knowledge.reindex()
     for line in service.install(poll=poll, hour=hour):
         console.print(line)
-    console.print(f"\n[green]brain is live[/green] — every {poll}s, briefing at {hour:02d}:00")
+    console.print(f"\n[green]brain is live[/green] — tick every {poll}s, "
+                  f"briefing at {hour:02d}:00, watchdog and sync running")
+    console.print("[dim]next: `brain health`[/dim]")
 
 
 @app.command()
