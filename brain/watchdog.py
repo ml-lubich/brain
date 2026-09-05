@@ -37,6 +37,7 @@ BREAKER_WINDOW = 6 * 3600  # seconds
 PIDFILE = "tick.pid"
 BREAKER = "breaker.json"
 LASTRUN = "watchdog.last"
+LASTOK = "tick.ok"
 
 
 def _path(name: str) -> Path:
@@ -48,6 +49,39 @@ def beat() -> None:
     A tick that correctly skips is still a healthy tick."""
     config.ensure_dirs()
     config.HEARTBEAT.write_text(str(int(time.time())))
+
+
+def mark_ok() -> None:
+    """A tick that actually reached Claude and got an answer.
+
+    Deliberately separate from the heartbeat. `beat()` fires before Claude is
+    invoked, which is what stops a rate-limited API from tripping the watchdog
+    into a restart loop — but it also means a tick whose Claude call fails
+    forever still looks alive. This is the signal that tells them apart.
+    """
+    config.ensure_dirs()
+    _path(LASTOK).write_text(str(int(time.time())))
+
+
+def productive_age() -> float | None:
+    """Seconds since Claude last answered, or None if it never has."""
+    path = _path(LASTOK)
+    if not path.exists():
+        return None
+    try:
+        return time.time() - float(path.read_text().strip())
+    except ValueError:
+        return None
+
+
+def watchdog_stale() -> bool:
+    """Has the watchdog itself stopped running?
+
+    Nothing watches the watchdog, so the tick watches it instead — each job
+    checks the other, which costs nothing and needs no third daemon.
+    """
+    age = _last_run_age()
+    return age is not None and age > watchdog_interval() * 4
 
 
 def heartbeat_age() -> float | None:
@@ -215,6 +249,8 @@ def check() -> dict:
         "hung_child": hung,
         "breaker_open": is_open,
         "attempts": attempts,
+        "productive_age": productive_age(),
+        "watchdog_age": _last_run_age(),
     }
 
 

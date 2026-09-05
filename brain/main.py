@@ -33,6 +33,10 @@ def tick(
 ) -> None:
     """One poll cycle. This is what launchd runs."""
     watchdog.beat()   # a tick that correctly does nothing is still a healthy tick
+    if watchdog.watchdog_stale():
+        # Nothing watches the watchdog, so the tick does. Mutual, no third daemon.
+        notify.send("brain", "the watchdog has stopped running — `brain install`")
+        agent.log("watchdog appears dead")
     doc = agent.snapshot()
     if dry:
         console.print(doc)
@@ -41,12 +45,15 @@ def tick(
     if not agent.changed(doc) and not force:
         agent.log("no change, skipping claude")
         console.print("[dim]no change, skipping claude[/dim]")
+        watchdog.mark_ok()   # deciding there is nothing to do IS a working tick
         return
 
     agent.log("change detected, invoking claude")
     out = agent.invoke()
     tail = out.strip().splitlines()[-1] if out.strip() else ""
     agent.log(f"claude: {tail}")
+    if tail and not tail.startswith(("claude CLI not found", "claude timed out")):
+        watchdog.mark_ok()
     console.print(tail or "[dim](no output)[/dim]")
 
     if tail and tail != "0 drafts, 0 proposals":
@@ -365,6 +372,13 @@ def health() -> None:
         str(state["hung_child"]) if state["hung_child"] else "none")
     row("breaker", not state["breaker_open"],
         f"{state['attempts']} attempts in window" + (" — OPEN" if state["breaker_open"] else ""))
+    # Liveness and usefulness are different questions; a job can run forever
+    # while achieving nothing, and the heartbeat alone would call that healthy.
+    productive = state["productive_age"]
+    row("last productive run", productive is not None and productive < state["stale_after"] * 4,
+        watchdog._fmt(productive) + " ago" if productive is not None else "never")
+    row("watchdog alive", not watchdog.watchdog_stale(),
+        watchdog._fmt(state["watchdog_age"]) + " ago" if state["watchdog_age"] else "never")
     for name, ch in all_channels().items():
         ok, why = ch.available()
         row(f"channel {name}", ok, why)

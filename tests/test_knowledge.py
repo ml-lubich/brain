@@ -315,3 +315,30 @@ def test_same_title_edits_in_place_rather_than_forking(tmp_path, monkeypatch):
     assert p1 == p2
     assert len(knowledge.all_notes()) == 1
     assert "completely different" in p2.read_text()
+
+
+# ------------------------------------------------ liveness vs usefulness
+
+def test_heartbeat_and_productive_run_are_separate_signals(tmp_path, monkeypatch):
+    """beat() fires before Claude is invoked, which is what stops a rate-limited
+    API from tripping a restart loop. The cost is that a tick whose Claude call
+    fails forever still looks alive — so success is tracked separately."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import watchdog
+    watchdog.beat()
+    assert watchdog.heartbeat_age() is not None
+    assert watchdog.productive_age() is None      # alive, but achieved nothing
+    watchdog.mark_ok()
+    assert watchdog.productive_age() is not None
+
+
+def test_tick_notices_a_dead_watchdog(tmp_path, monkeypatch):
+    """Nothing watches the watchdog, so the tick does. Mutual, no third daemon."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import watchdog
+    watchdog.mark_run()
+    assert watchdog.watchdog_stale() is False
+    watchdog._path(watchdog.LASTRUN).write_text(
+        str(int(time.time()) - watchdog.watchdog_interval() * 10)
+    )
+    assert watchdog.watchdog_stale() is True
