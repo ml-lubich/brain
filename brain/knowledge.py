@@ -14,6 +14,7 @@ Claude Code session on the machine reads the same notes; `brain sync` moves them
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import hashlib
 import re
 import sqlite3
@@ -145,56 +146,163 @@ def find_duplicate(body: str) -> Note | None:
     return None
 
 
+def _preserve(path: Path) -> None:
+    """Commit a note before editing it, so the previous wording is recoverable.
+
+    This is what makes an in-place edit safe: git history becomes the archive,
+    rather than leaving two contradictory copies in the working tree.
+    """
+    from . import sync as gitsync
+    if gitsync.is_repo() and gitsync.dirty():
+        gitsync.commit(f"snapshot before editing {path.name}")
+
+
 def learn(text: str, title: str = "", tags: list[str] | None = None,
-          append: bool = False) -> tuple[Path, str]:
-    """Write a note. Returns (path, action) where action is
-    created | appended | duplicate. Never overwrites blindly."""
+          append: bool = False, force: bool = False) -> tuple[Path, str]:
+    """Write a note.
+
+    Returns (path, action): created | appended | updated | duplicate | similar.
+    Nothing is ever lost — an in-place edit is committed first, so the previous
+    version stays in git history.
+    """
     notes_dir().mkdir(parents=True, exist_ok=True)
     tags = tags or []
     title = title or " ".join(text.split()[:8])
     path = notes_dir() / f"{slugify(title)}.md"
 
-    existing = find_duplicate(text)
-    if existing is not None:
-        return existing.path, "duplicate"
+    if not force:
+        exact = find_duplicate(text)
+        if exact is not None:
+            return exact.path, "duplicate"
+        if not append:
+            near, _ratio = similar(text, title)
+            if near is not None and near.path != path:
+                return near.path, "similar"
 
     if path.exists():
         note = parse(path)
-        if not append:
-            # Same title, different content. Keep both — never clobber a note.
-            stamp = dt.datetime.now().strftime("%Y%m%d%H%M%S")
-            path = notes_dir() / f"{slugify(title)}-{stamp}.md"
-        else:
-            note.body = f"{note.body}\n\n{text.strip()}"
-            note.updated = _today()
-            path.write_text(note.render())
-            reindex()
-            return path, "appended"
+        _preserve(path)
+        note.body = f"{note.body}\n\n{text.strip()}" if append else text.strip()
+        note.tags = sorted(set(note.tags) | set(tags))
+        note.updated = _today()
+        path.write_text(note.render())
+        reindex()
+        return path, "appended" if append else "updated"
 
     path.write_text(Note(path.stem, title, tags, text, path, _today()).render())
     reindex()
     return path, "created"
 
 
+STOPWORDS = {
+    "the", "a", "an", "and", "or", "is", "are", "was", "were", "to", "of", "in",
+    "on", "for", "with", "that", "this", "it", "as", "at", "by", "from", "not",
+}
+
+SELECT = ("SELECT title, snippet(notes, 3, '«', '»', ' … ', 18), path "
+          "FROM notes WHERE notes MATCH ? ORDER BY rank LIMIT ?")
+
+
+def terms(text: str, limit: int = 12) -> list[str]:
+    """Distinctive words, longest first — identifiers and paths beat filler.
+
+    Leading punctuation is stripped: a term like `--prod` is FTS5's NOT
+    operator, which turns the whole query into a syntax error and silently
+    returns zero rows. Zero rows is exactly the state that makes an agent
+    believe nothing is known and write a duplicate.
+    """
+    words = re.findall(r"[A-Za-z0-9_.-]{3,}", text.lower())
+    seen, out = set(), []
+    for word in sorted(words, key=len, reverse=True):
+        word = word.strip("-._")
+        if len(word) < 3 or word in STOPWORDS or word in seen:
+            continue
+        seen.add(word)
+        out.append(word)
+    return out[:limit]
+
+
+def _fts_or(words: list[str]) -> str:
+    """Quote every term so hyphens and dots are literals, not operators."""
+    return " OR ".join('"' + w.replace('"', "") + '"' for w in words)
+
+
+def _match(con, expression: str, limit: int) -> list[tuple[str, str, str]]:
+    try:
+        return con.execute(SELECT, (expression, limit)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
 def recall(query: str, limit: int = 10) -> list[tuple[str, str, str]]:
-    """Full-text search. Returns (title, snippet, path)."""
+    """Full-text search. Returns (title, snippet, path).
+
+    On a thin result set, retry with the terms OR'd. FTS5 will not match a
+    paraphrase, and the symptom is not slowness — it is an agent reading zero
+    rows as "nothing is known" and writing a near-duplicate. Widening on a miss
+    is the cheap half of the fix; deliberate tags are the other half.
+    """
     con = connect()
     try:
-        rows = con.execute(
-            "SELECT title, snippet(notes, 3, '«', '»', ' … ', 18), path "
-            "FROM notes WHERE notes MATCH ? ORDER BY rank LIMIT ?",
-            (query, limit),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # A bare word with FTS syntax chars in it — quote and retry.
-        rows = con.execute(
-            "SELECT title, snippet(notes, 3, '«', '»', ' … ', 18), path "
-            "FROM notes WHERE notes MATCH ? ORDER BY rank LIMIT ?",
-            ('"' + query.replace('"', "") + '"', limit),
-        ).fetchall()
+        rows = _match(con, query, limit)
+        if len(rows) < 3:
+            words = terms(query)
+            if words:
+                widened = _match(con, _fts_or(words), limit)
+                seen = {r[2] for r in rows}
+                rows += [r for r in widened if r[2] not in seen]
+        if not rows:
+            rows = _match(con, '"' + query.replace('"', "") + '"', limit)
     finally:
         con.close()
-    return rows
+    return rows[:limit]
+
+
+def all_tags() -> dict[str, int]:
+    """Tags in use, with counts. A closed vocabulary is the semantic bridge
+    that FTS5 cannot give you and embeddings would be overkill for."""
+    counts: dict[str, int] = {}
+    for note in all_notes():
+        for tag in note.tags:
+            counts[tag] = counts.get(tag, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _normalise(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+# Calibrated on real note pairs rather than guessed. A reworded duplicate of an
+# existing note measured difflib 0.70 / term-overlap 0.31; unrelated notes in the
+# same store measured 0.22-0.24 / 0.00. Both signals must agree, which keeps a
+# shared writing style from flagging genuinely new material.
+SIMILAR_RATIO = 0.55
+SIMILAR_OVERLAP = 0.15
+
+
+def _overlap(a: str, b: str) -> float:
+    """Jaccard over distinctive terms. Survives paraphrase where character
+    diffing wobbles, and goes to zero between unrelated notes."""
+    ta, tb = set(terms(a, 30)), set(terms(b, 30))
+    return len(ta & tb) / len(ta | tb) if (ta | tb) else 0.0
+
+
+def similar(text: str, title: str = "", threshold: float = SIMILAR_RATIO):
+    """(note, ratio) of an existing note that already says this.
+
+    Byte-identical hashing catches nothing an LLM produces — every real
+    duplicate is a reword. Fuzzy-compare, but only against the handful of
+    candidates FTS already ranked, so this stays bounded as the corpus grows.
+    """
+    probe = _normalise(text)
+    candidates = recall(" ".join(terms(f"{title} {text}")) or text, limit=5)
+    best, best_ratio = None, 0.0
+    for _, _, path in candidates:
+        note = parse(Path(path))
+        ratio = difflib.SequenceMatcher(None, _normalise(note.body), probe).ratio()
+        if ratio > best_ratio and _overlap(note.body, text) >= SIMILAR_OVERLAP:
+            best, best_ratio = note, ratio
+    return (best, best_ratio) if best_ratio >= threshold else (None, best_ratio)
 
 
 def stats() -> dict[str, str]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -139,7 +141,7 @@ def doctor() -> None:
     for name, ch in all_channels().items():
         ok, why = ch.available()
         bad += not ok
-        table.add_row(name, "yes" if ch.sendable else "draft-only",
+        table.add_row(name, "yes" if ch.sendable else _delivery(ch),
                       f"[green]{why}[/green]" if ok else f"[red]{why}[/red]")
     console.print(table)
     if not config.CONFIG_ENV.exists():
@@ -164,6 +166,23 @@ def channels() -> None:
     console.print(table)
 
 
+def _build_calendar_helper() -> str:
+    """Compile the EventKit helper. 0.2s per tick built, ~6s interpreted."""
+    import subprocess
+    from .channels.calendar import HELPER_BIN, HELPER_SRC
+
+    if not HELPER_SRC.exists():
+        return "[yellow]calendar helper source missing — skipping[/yellow]"
+    if not shutil.which("swiftc"):
+        return "[yellow]swiftc not found — calendar channel will interpret the source[/yellow]"
+    HELPER_BIN.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(["swiftc", "-O", "-o", str(HELPER_BIN), str(HELPER_SRC)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return f"[yellow]calendar helper did not build: {proc.stderr.strip()[:120]}[/yellow]"
+    return f"[dim]built calendar helper -> {HELPER_BIN}[/dim]"
+
+
 @app.command()
 def install(
     poll: int = typer.Option(config.POLL_SECONDS, help="Seconds between ticks."),
@@ -180,6 +199,7 @@ def install(
         for line in gitsync.init(knowledge_remote):
             console.print(f"[dim]{line}[/dim]")
     knowledge.reindex()
+    console.print(_build_calendar_helper())
     for line in service.install(poll=poll, hour=hour):
         console.print(line)
     console.print(f"\n[green]brain is live[/green] — tick every {poll}s, "
@@ -234,16 +254,27 @@ def learn(
     title: str = typer.Option("", "--title", "-t", help="Note title. Defaults to the first words."),
     tags: str = typer.Option("", "--tags", help="Comma-separated tags."),
     append: bool = typer.Option(False, "--append", "-a", help="Append to an existing note of the same title."),
+    force: bool = typer.Option(False, "--force", help="Write even if a similar note already exists."),
     push: bool = typer.Option(False, "--push", "-p", help="Sync to the remote straight after."),
 ) -> None:
-    """Record something worth keeping. Deduplicates; never overwrites a note."""
+    """Record something worth keeping.
+
+    Refuses when an existing note already says this — every real duplicate is a
+    reword, so the check is fuzzy, not a hash. Pass --force to write anyway.
+    """
     path, action = knowledge.learn(
         text, title=title,
         tags=[t.strip() for t in tags.split(",") if t.strip()],
-        append=append,
+        append=append, force=force,
     )
-    colour = {"created": "green", "appended": "cyan", "duplicate": "yellow"}[action]
+    colour = {"created": "green", "appended": "cyan", "updated": "cyan",
+              "duplicate": "yellow", "similar": "yellow"}[action]
     console.print(f"[{colour}]{action}[/{colour}] {path}")
+    if action == "similar":
+        console.print(f"[dim]already covered there. Edit it with "
+                      f"`brain learn ... --title \"{knowledge.parse(path).title}\" --append`, "
+                      f"or re-run with --force.[/dim]")
+        return
     if push:
         for line in gitsync.sync(f"learn: {title or text[:50]}"):
             console.print(f"  {line}")
@@ -343,4 +374,18 @@ def health() -> None:
     row("knowledge sync", gs.get("repo") != "not initialised",
         f"ahead {gs.get('ahead','?')} behind {gs.get('behind','?')} dirty {gs.get('dirty','?')}"
         if gs.get("repo") != "not initialised" else "not initialised")
+    console.print(table)
+
+
+@app.command()
+def tags() -> None:
+    """Tags already in use. Reuse one before inventing a new one — a closed
+    vocabulary is what makes recall work without embeddings."""
+    counts = knowledge.all_tags()
+    if not counts:
+        console.print("[dim]no tags yet[/dim]")
+        return
+    table = Table("tag", "notes")
+    for tag, count in counts.items():
+        table.add_row(tag, str(count))
     console.print(table)

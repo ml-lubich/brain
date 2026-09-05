@@ -135,7 +135,12 @@ def push() -> str:
 
 
 def sync(message: str = "") -> list[str]:
-    """pull -> commit -> push, in the order that cannot lose work."""
+    """commit -> pull --rebase -> push, in that order.
+
+    Committing first matters: `pull --rebase` against a tree left dirty by a
+    concurrent session aborts, and a timer-driven sync would then silently
+    no-op for hours. One file per note means separate notes always merge.
+    """
     if not is_repo():
         return ["no knowledge repo — run `brain knowledge init`"]
     steps = [commit(message), pull()]

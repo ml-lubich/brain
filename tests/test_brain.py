@@ -149,6 +149,7 @@ def test_read_only_channels_do_not_claim_to_deliver_mail_drafts(tmp_path, monkey
 
     found = all_channels()
     assert _delivery(found["gh"]) == "read-only"
+    assert _delivery(found["cal"]) == "read-only"
     assert _delivery(found["mail"]) == "Mail.app drafts"
     assert _delivery(found["imsg"]) == "brain approve"
 
@@ -161,3 +162,68 @@ def test_cli_still_exposes_its_commands(tmp_path, monkeypatch):
 
     registered = {c.callback.__name__ for c in app.registered_commands}
     assert {"channels", "doctor", "tick", "approve"} <= registered
+
+
+# --- calendar channel -------------------------------------------------------
+# AppleScript cannot do this: enumerating events across the 11 calendars took
+# 68 seconds, and four named calendars still took 20. EventKit compiled with
+# swiftc answers in 0.2s. The channel therefore shells out to a small binary,
+# and falls back to interpreting the source when it has not been built yet.
+
+
+def test_calendar_channel_is_discovered_and_is_read_only(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import all_channels
+
+    found = all_channels()
+    assert "cal" in found
+    assert found["cal"].sendable is False
+
+
+def test_calendar_prefers_the_compiled_helper(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import calendar as cal_mod
+
+    binary = tmp_path / "brain-calendar"
+    binary.write_text("#!/bin/sh\necho hi\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(cal_mod, "HELPER_BIN", binary)
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cal_mod, "run", lambda cmd, timeout=30: (seen.append(cmd), "09:00–10:00  Standup")[1])
+
+    out = cal_mod.Calendar().snapshot()
+    assert seen == [[str(binary)]]
+    assert "Standup" in out
+
+
+def test_calendar_falls_back_to_interpreting_the_source(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import calendar as cal_mod
+
+    monkeypatch.setattr(cal_mod, "HELPER_BIN", tmp_path / "does-not-exist")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cal_mod, "run", lambda cmd, timeout=30: (seen.append(cmd), "")[1])
+
+    cal_mod.Calendar().snapshot()
+    assert seen[0][0] == "swift"
+    assert seen[0][1].endswith("calendar-today.swift")
+
+
+def test_calendar_reports_denied_access_rather_than_pretending_the_day_is_empty(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import calendar as cal_mod
+
+    monkeypatch.setattr(cal_mod, "run", lambda cmd, timeout=30: "(calendar access not granted)")
+    ok, why = cal_mod.Calendar().available()
+    assert ok is False
+    assert "Calendar" in why
+
+
+def test_calendar_channel_refuses_to_send(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels.calendar import Calendar
+    import pytest as _pytest
+
+    with _pytest.raises(NotImplementedError):
+        Calendar().send("someone", "hi")

@@ -227,3 +227,85 @@ def test_sleep_path_records_no_breaker_attempt(tmp_path, monkeypatch):
     actions = watchdog.run()
     assert any("resumed after" in a for a in actions)
     assert watchdog.breaker_state() == (False, 0)   # nothing spent
+
+
+# --------------------------------------------- dedup calibration (measured)
+
+VERCEL_ORIGINAL = ("Vercel auto-deploy from GitHub pushes has been broken since "
+                   "2026-07-25. Ship with 'vercel --prod --yes' and verify prod "
+                   "with a marker string.")
+VERCEL_REWORD = ("Vercel autodeploy from github pushes stopped working back in "
+                 "July 2026; you have to ship using vercel --prod --yes and "
+                 "check prod with a marker")
+UNRELATED = ("ClickUp rate limits are account-wide and burst sensitive; back "
+             "off globally rather than per-list.")
+
+
+def test_a_reworded_duplicate_is_refused(tmp_path, monkeypatch):
+    """The real duplicate is always a reword — byte-hashing never sees it."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.learn(VERCEL_ORIGINAL, title="Vercel autodeploy broken")
+    path, action = knowledge.learn(VERCEL_REWORD, title="Vercel deploy notes")
+    assert action == "similar"
+    assert path.name == "vercel-autodeploy-broken.md"
+    assert len(knowledge.all_notes()) == 1
+
+
+def test_an_unrelated_note_is_still_accepted(tmp_path, monkeypatch):
+    """The dedup must not become a wall that refuses genuinely new facts."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.learn(VERCEL_ORIGINAL, title="Vercel autodeploy broken")
+    _, action = knowledge.learn(UNRELATED, title="ClickUp rate limits")
+    assert action == "created"
+    assert len(knowledge.all_notes()) == 2
+
+
+def test_force_overrides_the_similarity_refusal(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.learn(VERCEL_ORIGINAL, title="Vercel autodeploy broken")
+    _, action = knowledge.learn(VERCEL_REWORD, title="Vercel deploy notes", force=True)
+    assert action == "created"
+
+
+def test_thresholds_separate_the_measured_cases(tmp_path, monkeypatch):
+    """Guards the calibration itself: the reword must score above the cut and
+    unrelated notes below it, with margin on both sides."""
+    _isolate(tmp_path, monkeypatch)
+    import difflib
+    from brain import knowledge
+    ratio = difflib.SequenceMatcher(
+        None, knowledge._normalise(VERCEL_ORIGINAL), knowledge._normalise(VERCEL_REWORD)
+    ).ratio()
+    unrelated = difflib.SequenceMatcher(
+        None, knowledge._normalise(VERCEL_ORIGINAL), knowledge._normalise(UNRELATED)
+    ).ratio()
+    assert ratio > knowledge.SIMILAR_RATIO > unrelated
+    assert knowledge._overlap(VERCEL_ORIGINAL, VERCEL_REWORD) >= knowledge.SIMILAR_OVERLAP
+    assert knowledge._overlap(VERCEL_ORIGINAL, UNRELATED) < knowledge.SIMILAR_OVERLAP
+
+
+def test_operator_punctuation_does_not_break_search(tmp_path, monkeypatch):
+    """A term like `--prod` is FTS5's NOT operator; unquoted it errors the whole
+    query to zero rows, which is what makes an agent think nothing is known."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.learn(VERCEL_ORIGINAL, title="Vercel autodeploy broken")
+    assert "--prod" not in knowledge.terms(VERCEL_ORIGINAL)
+    assert knowledge.recall("ship with vercel --prod --yes")
+
+
+def test_same_title_edits_in_place_rather_than_forking(tmp_path, monkeypatch):
+    """Two contradictory notes with no way to tell which is current is the
+    failure this store exists to prevent. Git history is the archive."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    p1, _ = knowledge.learn("the original claim", title="Topic")
+    p2, action = knowledge.learn("a completely different claim about lume vms",
+                                 title="Topic", force=True)
+    assert action == "updated"
+    assert p1 == p2
+    assert len(knowledge.all_notes()) == 1
+    assert "completely different" in p2.read_text()
