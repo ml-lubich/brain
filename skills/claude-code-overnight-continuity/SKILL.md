@@ -89,6 +89,17 @@ done marker.
   manual run: check `launchctl print gui/$(id -u)/<label> | grep "last exit code"` and
   confirm a fresh line in the log. A keepalive you believe in but never verified is worse
   than none, because you stop watching the thing it was supposed to watch.
+- **A busy check must ask about the process's cwd, not its argv.** `pgrep -fl claude | grep
+  <path>` looks correct and silently never matches: a `claude -p` worker does not carry its
+  working directory in its command line. On 2026-09-05 that made the guard a no-op — the agent
+  fired ten times in a row and spawned duplicate workers on the same repo, burning half the
+  lifetime fire budget before anyone noticed. Ask `lsof -a -p <pid> -d cwd -Fn` instead. Know
+  the residual limit too: an *interactive* session started from a different directory still
+  will not match, so this guard stops spawn-on-spawn pile-ups, not a human's own session.
+- **A done-marker is a loaded gun.** Writing it early stops the keepalive silently — the log
+  just says `done <job>` every interval and looks healthy. One was written prematurely and the
+  agent skipped for 30 minutes before it was caught. Only write the marker when the work is
+  genuinely finished, and if you inherit a run, check for the marker FIRST.
 - **Watch your own load.** Fanning out subagents while the supervised job is running starves
   it. Load average 69 on a laptop means the batch you are babysitting is the thing you
   starved. Cap concurrency, or stagger the audit work.

@@ -36,8 +36,20 @@ job_done() {
 
 # Already working? Any claude process whose command line mentions this cwd.
 job_running() {
-  local cwd="$1"
-  pgrep -fl "claude" 2>/dev/null | grep -Fq -- "$cwd"
+  # Is a claude process already WORKING IN this directory?
+  #
+  # This used to grep the process command line for the path. That silently never matched: a
+  # `claude -p` worker does not carry its cwd in argv, so on 2026-09-05 the agent fired ten
+  # times in a row (15:36-17:26) and spawned duplicate workers on the same repo, burning half
+  # the lifetime fire budget. A process's real cwd is the thing to ask about, and lsof answers
+  # it. Note an INTERACTIVE session started from elsewhere still will not match — by design,
+  # this guard exists to stop spawn-on-spawn pile-ups, which is the runaway risk.
+  local cwd="$1" pid pcwd
+  for pid in $(pgrep -x claude 2>/dev/null); do
+    pcwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    [ "$pcwd" = "$cwd" ] && return 0
+  done
+  return 1
 }
 
 # Lifetime cap so a broken job cannot spawn forever.
