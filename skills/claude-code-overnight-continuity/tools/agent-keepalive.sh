@@ -85,7 +85,16 @@ _run_job() {
   [ -d "$cwd" ] || { _log "skip $name: cwd missing ($cwd)"; return 0; }
   job_done "$cwd" "$marker" && { _log "done $name (marker $marker)"; return 0; }
   job_running "$cwd" && { _log "busy $name"; return 0; }
-  fires_exhausted "$count_file" "$MAX_FIRES" && { _log "capped $name at $MAX_FIRES fires"; return 0; }
+  # A count cap ENDS continuity, so say so unmistakably. Hitting 60 on 2026-09-06 silently
+  # stopped the mechanism the owner had asked to run indefinitely: the log said "capped" once
+  # and then nothing, which is indistinguishable from a quiet, healthy machine. The cap's
+  # original job -- catching a runaway spawn -- is now done by the cwd busy check (argv did not
+  # match a `claude -p` worker) and the watchdog's own mkdir singleton guard.
+  if fires_exhausted "$count_file" "$MAX_FIRES"; then
+    _log "!! CAPPED $name at $MAX_FIRES fires -- CONTINUITY IS OFF until the count is reset"
+    _log "!! reset: echo 0 > $count_file   (or raise KEEPALIVE_MAX_FIRES in the plist)"
+    return 0
+  fi
   [ "${KEEPALIVE_DRY_RUN:-0}" = "1" ] && { _log "dry-run would fire $name"; return 0; }
   bump_fires "$count_file"
   _fire_job "$name" "$cwd" "$prompt"
