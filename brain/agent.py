@@ -16,7 +16,12 @@ from .channels import all_channels
 # passed to --disallowedTools as well as being absent from --allowedTools,
 # because this boundary is the only thing standing between "drafts a reply"
 # and "emails a client at 3am unattended".
-FORBIDDEN = ["Bash(imail send:*)", "Bash(imsg send:*)", "Bash(wa send:*)"]
+FORBIDDEN = [
+    "Bash(imail send:*)",
+    "Bash(imail autodraft:*)",
+    "Bash(imsg send:*)",
+    "Bash(wa send:*)",
+]
 
 ALLOWED = [
     "Read",
@@ -51,10 +56,11 @@ pipeline, or active projects, update the matching section of {todo} in place.
 Keep it tight. Do not create new files.
 
 Rules:
-- Skip newsletters, receipts, notifications, automated mail. Silence is a valid outcome.
-- Match his voice: short, direct, lowercase-ish, no corporate filler, no em dashes.
+- Skip newsletters, receipts, notifications, automated mail, and generic staffing blasts. Silence is a valid outcome.
+- Match his voice: short, direct, lowercase, no analogies, no markdown, no corporate filler, no em dashes.
 - Booking CTA when relevant: mishalubich.com
-- Never send. Never delete. Never touch Apple Notes.
+- Never send. Never run `imail autodraft`. Never delete. Never touch Apple Notes.
+- Hourly `brain reply` owns imail autodraft. This tick only drafts via `imail draft`.
 - Finish with ONE line exactly: "N drafts, M proposals" (0 0 if nothing was worth doing).
 """
 

@@ -245,7 +245,7 @@ def check() -> dict:
         "stale": age is None or age > stale_after(),
         "stale_after": stale_after(),
         "jobs_loaded": loaded,
-        "jobs_missing": [l for l in (service.TICK, service.DIGEST) if l not in loaded],
+        "jobs_missing": [l for l in (service.TICK, service.DIGEST, service.REPLY) if l not in loaded],
         "hung_child": hung,
         "breaker_open": is_open,
         "attempts": attempts,

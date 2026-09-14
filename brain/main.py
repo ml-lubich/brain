@@ -60,6 +60,33 @@ def tick(
         notify.send("brain", f"{tail} · {queue.count()} queued · run `brain queue`")
 
 
+@app.command()
+def reply(
+    dry: bool = typer.Option(False, "--dry", "-n", help="Preview autodraft decisions without writing."),
+    limit: int = typer.Option(15, "--limit", help="Max messages per personal inbox."),
+) -> None:
+    """Hourly mail autodraft via imail. What launchd runs as com.mlubich.brain-reply."""
+    import subprocess
+
+    cmd = ["imail", "autodraft", "--limit", str(limit)]
+    if dry:
+        cmd.append("--dry-run")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, check=False)
+    except FileNotFoundError:
+        console.print("[red]imail not on PATH[/red]")
+        raise typer.Exit(1)
+    except subprocess.TimeoutExpired:
+        agent.log("reply: imail autodraft timed out")
+        console.print("[red]imail autodraft timed out[/red]")
+        raise typer.Exit(1)
+    out = (proc.stdout + proc.stderr).strip()
+    agent.log(f"reply: {out.splitlines()[-1] if out else 'empty'}")
+    console.print(out or "[dim]no pending messages[/dim]")
+    if proc.returncode != 0:
+        raise typer.Exit(proc.returncode)
+
+
 @app.command("queue")
 def queue_cmd() -> None:
     """Show pending proposals awaiting approval."""
@@ -210,7 +237,7 @@ def install(
     for line in service.install(poll=poll, hour=hour):
         console.print(line)
     console.print(f"\n[green]brain is live[/green] — tick every {poll}s, "
-                  f"briefing at {hour:02d}:00, watchdog and sync running")
+                  f"reply hourly, briefing at {hour:02d}:00, watchdog and sync running")
     console.print("[dim]next: `brain health`[/dim]")
 
 

@@ -14,7 +14,8 @@ TICK = "com.mlubich.brain"
 DIGEST = "com.mlubich.brain-digest"
 WATCH = "com.mlubich.brain-watchdog"
 SYNC = "com.mlubich.brain-sync"
-ALL = (TICK, DIGEST, WATCH, SYNC)
+REPLY = "com.mlubich.brain-reply"
+ALL = (TICK, DIGEST, WATCH, SYNC, REPLY)
 
 # launchd hands jobs a minimal PATH, so it must be stated explicitly or every
 # CLI the channels shell out to silently vanishes.
@@ -83,6 +84,7 @@ def install(poll: int | None = None, hour: int | None = None) -> list[str]:
         _write(WATCH, "watchdog",
                f"<key>StartInterval</key><integer>{max(120, poll // 2)}</integer>"),
         _write(SYNC, "sync", f"<key>StartInterval</key><integer>{max(900, poll * 3)}</integer>"),
+        _write(REPLY, "reply", "<key>StartInterval</key><integer>3600</integer>"),
     ]
     uid = os.getuid()
     results = []

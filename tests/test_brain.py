@@ -65,7 +65,7 @@ def test_send_tools_are_forbidden(tmp_path, monkeypatch):
     """The only thing preventing unattended sends. Never let this regress."""
     _isolate(tmp_path, monkeypatch)
     from brain import agent
-    for tool in ("Bash(imail send:*)", "Bash(imsg send:*)", "Bash(wa send:*)"):
+    for tool in ("Bash(imail send:*)", "Bash(imail autodraft:*)", "Bash(imsg send:*)", "Bash(wa send:*)"):
         assert tool in agent.FORBIDDEN
         assert tool not in agent.ALLOWED
     assert not any("send" in t for t in agent.ALLOWED)
@@ -161,7 +161,50 @@ def test_cli_still_exposes_its_commands(tmp_path, monkeypatch):
     from brain.main import app
 
     registered = {c.callback.__name__ for c in app.registered_commands}
-    assert {"channels", "doctor", "tick", "approve"} <= registered
+    assert {"channels", "doctor", "tick", "approve", "reply"} <= registered
+
+
+def test_mail_snapshot_covers_all_personal_accounts(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain.channels import mail as mail_mod
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(mail_mod, "run", lambda cmd, timeout=30: (calls.append(cmd), "[]")[1])
+
+    out = mail_mod.Mail().snapshot()
+    accounts = [c[c.index("--account") + 1] for c in calls if "--account" in c]
+    assert accounts == [
+        "michaelle.lubich@gmail.com",
+        "metropol007@gmail.com",
+        "misha@lupfr.com",
+    ]
+    assert "michaelle.lubich@gmail.com" in out
+    assert "metropol007@gmail.com" in out
+    assert "misha@lupfr.com" in out
+
+
+def test_headless_claude_cannot_run_imail_autodraft(tmp_path, monkeypatch):
+    """autodraft can send low-stakes follow-ups. Headless Claude must not."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import agent
+    assert "Bash(imail autodraft:*)" in agent.FORBIDDEN
+    assert not any("autodraft" in t for t in agent.ALLOWED)
+
+
+def test_hourly_reply_job_is_part_of_brain_install(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import service
+    assert service.REPLY == "com.mlubich.brain-reply"
+    assert service.REPLY in service.ALL
+    written: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(service, "_write", lambda label, command, schedule: written.append((label, command, schedule)) or tmp_path / f"{label}.plist")
+    monkeypatch.setattr(service, "_launchctl", lambda *a: (0, ""))
+    service.install()
+    labels = [w[0] for w in written]
+    assert service.REPLY in labels
+    reply = next(w for w in written if w[0] == service.REPLY)
+    assert reply[1] == "reply"
+    assert "3600" in reply[2]
 
 
 # --- calendar channel -------------------------------------------------------

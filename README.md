@@ -1,7 +1,8 @@
 # brain
 
 Always-on inbox agent for macOS. A timer notices your channels changed, wakes a
-headless Claude, and it drafts replies. You approve. It cannot send.
+headless Claude, and it drafts replies. You approve. Headless Claude cannot send.
+Hourly `brain reply` runs `imail autodraft` on the three personal walls.
 
 ```
 launchd (every 10 min)
@@ -43,8 +44,9 @@ brain install                 # write + load the launchd agents
 | Command | Does |
 |---|---|
 | `brain tick` | One poll cycle. What launchd runs. `--dry` builds the snapshot without calling Claude, `--force` calls it anyway. |
+| `brain reply` | Hourly mail autodraft via `imail autodraft`. `--dry` previews. Personal accounts only. |
 | `brain queue` | Pending proposals, numbered. |
-| `brain approve N` | Actually send proposal N. The only send path in the codebase. |
+| `brain approve N` | Send queued iMessage/WhatsApp. Email approval is Mail.app drafts; autodraft auto-send is only for known low-stakes follow-ups. |
 | `brain drop N` | Discard proposal N. |
 | `brain digest` | End-of-day briefing now. |
 | `brain status` | Last tick, queue depth, launchd state, notifications. |
