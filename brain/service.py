@@ -15,7 +15,7 @@ DIGEST = "com.mlubich.brain-digest"
 WATCH = "com.mlubich.brain-watchdog"
 SYNC = "com.mlubich.brain-sync"
 REPLY = "com.mlubich.brain-reply"
-REPLY_TIMES = [(8, 0), (12, 30), (18, 0)]  # morning, lunch, evening
+REPLY_TIMES = [(8, 0), (14, 0), (19, 0)]  # morning, afternoon, evening
 ALL = (TICK, DIGEST, WATCH, SYNC, REPLY)
 
 # launchd hands jobs a minimal PATH, so it must be stated explicitly or every
