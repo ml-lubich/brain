@@ -15,6 +15,7 @@ DIGEST = "com.mlubich.brain-digest"
 WATCH = "com.mlubich.brain-watchdog"
 SYNC = "com.mlubich.brain-sync"
 REPLY = "com.mlubich.brain-reply"
+REPLY_TIMES = [(8, 0), (12, 30), (18, 0)]  # morning, lunch, evening
 ALL = (TICK, DIGEST, WATCH, SYNC, REPLY)
 
 # launchd hands jobs a minimal PATH, so it must be stated explicitly or every
@@ -84,7 +85,9 @@ def install(poll: int | None = None, hour: int | None = None) -> list[str]:
         _write(WATCH, "watchdog",
                f"<key>StartInterval</key><integer>{max(120, poll // 2)}</integer>"),
         _write(SYNC, "sync", f"<key>StartInterval</key><integer>{max(900, poll * 3)}</integer>"),
-        _write(REPLY, "reply", "<key>StartInterval</key><integer>3600</integer>"),
+        _write(REPLY, "reply", "<key>StartCalendarInterval</key><array>" + "".join(
+            f"<dict><key>Hour</key><integer>{h}</integer><key>Minute</key><integer>{m}</integer></dict>"
+            for h, m in REPLY_TIMES) + "</array>"),
     ]
     uid = os.getuid()
     results = []

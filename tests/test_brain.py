@@ -191,7 +191,7 @@ def test_headless_claude_cannot_run_imail_autodraft(tmp_path, monkeypatch):
     assert not any("autodraft" in t for t in agent.ALLOWED)
 
 
-def test_hourly_reply_job_is_part_of_brain_install(tmp_path, monkeypatch):
+def test_reply_job_runs_morning_lunch_evening(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     from brain import service
     assert service.REPLY == "com.mlubich.brain-reply"
@@ -204,7 +204,10 @@ def test_hourly_reply_job_is_part_of_brain_install(tmp_path, monkeypatch):
     assert service.REPLY in labels
     reply = next(w for w in written if w[0] == service.REPLY)
     assert reply[1] == "reply"
-    assert "3600" in reply[2]
+    assert "StartCalendarInterval" in reply[2] and "3600" not in reply[2]
+    for h, m in service.REPLY_TIMES:
+        assert f"<key>Hour</key><integer>{h}</integer><key>Minute</key><integer>{m}</integer>" in reply[2]
+    assert service.REPLY_TIMES == [(8, 0), (12, 30), (18, 0)]
 
 
 # --- calendar channel -------------------------------------------------------

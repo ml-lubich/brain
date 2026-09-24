@@ -65,14 +65,14 @@ def reply(
     dry: bool = typer.Option(False, "--dry", "-n", help="Preview autodraft decisions without writing."),
     limit: int = typer.Option(15, "--limit", help="Max messages per personal inbox."),
 ) -> None:
-    """Hourly mail autodraft via imail. What launchd runs as com.mlubich.brain-reply."""
+    """Mail autodraft via imail at 08:00, 12:30, 18:00. What launchd runs as com.mlubich.brain-reply."""
     import subprocess
 
     cmd = ["imail", "autodraft", "--limit", str(limit)]
     if dry:
         cmd.append("--dry-run")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, check=False)
     except FileNotFoundError:
         console.print("[red]imail not on PATH[/red]")
         raise typer.Exit(1)
@@ -237,7 +237,7 @@ def install(
     for line in service.install(poll=poll, hour=hour):
         console.print(line)
     console.print(f"\n[green]brain is live[/green] — tick every {poll}s, "
-                  f"reply hourly, briefing at {hour:02d}:00, watchdog and sync running")
+                  f"reply 08:00/12:30/18:00, briefing at {hour:02d}:00, watchdog and sync running")
     console.print("[dim]next: `brain health`[/dim]")
 
 
