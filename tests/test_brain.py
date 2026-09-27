@@ -273,3 +273,105 @@ def test_calendar_channel_refuses_to_send(tmp_path, monkeypatch):
 
     with _pytest.raises(NotImplementedError):
         Calendar().send("someone", "hi")
+
+
+# --- knowledge agent-friendly CLI & lookup tests ----------------------------
+
+
+def test_note_to_dict_and_get_note(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    path, action = knowledge.learn("Vercel prod deployment gotcha", title="Vercel Deploy", tags=["vercel", "gotcha"])
+    assert action == "created"
+
+    note = knowledge.get_note("vercel-deploy")
+    assert note is not None
+    assert note.title == "Vercel Deploy"
+    assert note.tags == ["vercel", "gotcha"]
+    assert "Vercel prod deployment gotcha" in note.body
+
+    d = note.to_dict()
+    assert d["slug"] == "vercel-deploy"
+    assert d["title"] == "Vercel Deploy"
+    assert d["tags"] == ["vercel", "gotcha"]
+    assert "gotcha" in d["body"]
+    assert str(path) == d["path"]
+
+    # Lookup by title case-insensitive
+    by_title = knowledge.get_note("Vercel Deploy")
+    assert by_title is not None
+    assert by_title.slug == note.slug
+
+    # Non-existent
+    assert knowledge.get_note("does-not-exist") is None
+
+
+def test_cli_recall_json_output(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from typer.testing import CliRunner
+    from brain import knowledge
+    from brain.main import app
+
+    knowledge.learn("Deploy with vercel --prod --yes", title="Vercel Ship", tags=["deploy"])
+    runner = CliRunner()
+    res = runner.invoke(app, ["recall", "vercel", "--json"])
+    assert res.exit_code == 0
+    data = json.loads(res.stdout)
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    assert data[0]["title"] == "Vercel Ship"
+    assert "snippet" in data[0]
+    assert "path" in data[0]
+    assert "slug" in data[0]
+
+
+def test_cli_show_command(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from typer.testing import CliRunner
+    from brain import knowledge
+    from brain.main import app
+
+    knowledge.learn("Detailed deployment guidelines here", title="Deploy Guide", tags=["guide"])
+    runner = CliRunner()
+
+    # Plaintext view
+    res = runner.invoke(app, ["show", "deploy-guide"])
+    assert res.exit_code == 0
+    assert "Detailed deployment guidelines here" in res.stdout
+
+    # JSON view
+    res_json = runner.invoke(app, ["show", "deploy-guide", "--json"])
+    assert res_json.exit_code == 0
+    data = json.loads(res_json.stdout)
+    assert data["slug"] == "deploy-guide"
+    assert data["title"] == "Deploy Guide"
+    assert "Detailed deployment guidelines here" in data["body"]
+
+    # Missing note returns exit code 1
+    res_missing = runner.invoke(app, ["show", "non-existent-note"])
+    assert res_missing.exit_code != 0
+
+
+def test_cli_list_command(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from typer.testing import CliRunner
+    from brain import knowledge
+    from brain.main import app
+
+    knowledge.learn("Alpha topic details and documentation", title="Alpha Notes", tags=["alpha"])
+    knowledge.learn("Beta systems operational runbook and architecture", title="Beta Runbook", tags=["beta"])
+    runner = CliRunner()
+
+    # Normal list
+    res = runner.invoke(app, ["list"])
+    assert res.exit_code == 0
+    assert "Alpha Notes" in res.stdout
+    assert "Beta Runbook" in res.stdout
+
+    # Filtered by tag
+    res_tag = runner.invoke(app, ["list", "--tag", "alpha", "--json"])
+    assert res_tag.exit_code == 0
+    data = json.loads(res_tag.stdout)
+    assert len(data) == 1
+    assert data[0]["title"] == "Alpha Notes"
+

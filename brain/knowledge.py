@@ -56,6 +56,16 @@ class Note:
         norm = re.sub(r"\s+", " ", self.body.strip().lower())
         return hashlib.sha256(norm.encode()).hexdigest()[:16]
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "slug": self.slug,
+            "title": self.title,
+            "tags": list(self.tags),
+            "body": self.body,
+            "path": str(self.path),
+            "updated": self.updated or _today(),
+        }
+
     def render(self) -> str:
         return (
             "---\n"
@@ -113,6 +123,24 @@ def all_notes() -> list[Note]:
     if not notes_dir().exists():
         return []
     return [parse(p) for p in sorted(notes_dir().glob("*.md"))]
+
+
+def get_note(slug_or_title: str) -> Note | None:
+    """Retrieve a note by exact slug, filename, or case-insensitive title."""
+    probe = slug_or_title.strip()
+    slug = slugify(probe)
+    target = notes_dir() / f"{slug}.md"
+    if target.exists():
+        return parse(target)
+    # Check direct filename match if user passed e.g. "foo.md"
+    if (notes_dir() / probe).exists():
+        return parse(notes_dir() / probe)
+    # Fallback to linear scan by title or slug
+    probe_lower = probe.lower()
+    for note in all_notes():
+        if note.slug == probe_lower or note.title.lower() == probe_lower:
+            return note
+    return None
 
 
 def reindex() -> int:

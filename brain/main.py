@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -318,14 +319,84 @@ def learn(
 def recall(
     query: str = typer.Argument(..., help="Full-text search over everything learned."),
     limit: int = typer.Option(10, "--limit", "-n"),
+    json_out: bool = typer.Option(False, "--json", help="Output results as JSON for agents."),
 ) -> None:
     """Search the knowledge index."""
+    import json as _json
+
     rows = knowledge.recall(query, limit)
+    if json_out:
+        results = []
+        for title, snippet, path in rows:
+            results.append({
+                "title": title,
+                "snippet": snippet,
+                "path": str(path),
+                "slug": Path(path).stem,
+            })
+        print(_json.dumps(results, indent=2))
+        return
+
     if not rows:
         console.print(f"[dim]nothing for {query!r} ({knowledge.stats()['notes']} notes indexed)[/dim]")
         return
     for title, snippet, path in rows:
         console.print(f"[bold]{title}[/bold]\n  {snippet}\n  [dim]{path}[/dim]\n")
+
+
+@app.command()
+def show(
+    slug_or_title: str = typer.Argument(..., help="Slug or title of the note to inspect."),
+    json_out: bool = typer.Option(False, "--json", help="Output note details as JSON for agents."),
+) -> None:
+    """Display a note's full content and metadata."""
+    import json as _json
+
+    note = knowledge.get_note(slug_or_title)
+    if not note:
+        console.print(f"[red]note not found:[/red] {slug_or_title}")
+        raise typer.Exit(1)
+
+    if json_out:
+        print(_json.dumps(note.to_dict(), indent=2))
+        return
+
+    console.print(f"[bold cyan]{note.title}[/bold cyan]")
+    if note.tags:
+        console.print(f"[dim]tags: {', '.join(note.tags)}[/dim]")
+    if note.updated:
+        console.print(f"[dim]updated: {note.updated}[/dim]")
+    console.print(f"[dim]path: {note.path}[/dim]\n")
+    console.print(note.body)
+
+
+@app.command("list")
+def list_cmd(
+    tag: str = typer.Option("", "--tag", "-t", help="Filter by tag."),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max notes to list."),
+    json_out: bool = typer.Option(False, "--json", help="Output notes as JSON."),
+) -> None:
+    """List notes in the knowledge base."""
+    import json as _json
+
+    notes = knowledge.all_notes()
+    if tag:
+        t_clean = tag.strip().lower()
+        notes = [n for n in notes if t_clean in [x.lower() for x in n.tags]]
+    notes = notes[:limit]
+
+    if json_out:
+        print(_json.dumps([n.to_dict() for n in notes], indent=2))
+        return
+
+    if not notes:
+        console.print("[dim]no notes found[/dim]")
+        return
+
+    table = Table("slug", "title", "tags", "updated")
+    for n in notes:
+        table.add_row(n.slug, n.title, ", ".join(n.tags), n.updated or "-")
+    console.print(table)
 
 
 @app.command()
