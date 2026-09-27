@@ -5,6 +5,7 @@ notes are never clobbered, sync never force-pushes, and the watchdog can never
 signal an interactive claude session.
 """
 
+import hashlib
 import os
 import sys
 import time
@@ -15,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
     monkeypatch.setenv("BRAIN_KNOWLEDGE", str(tmp_path / "knowledge"))
+    monkeypatch.setenv("BRAIN_EMBED", "0")
     for mod in [m for m in list(sys.modules) if m.startswith("brain")]:
         del sys.modules[mod]
     from brain import config
@@ -300,6 +302,252 @@ def test_operator_punctuation_does_not_break_search(tmp_path, monkeypatch):
     knowledge.learn(VERCEL_ORIGINAL, title="Vercel autodeploy broken")
     assert "--prod" not in knowledge.terms(VERCEL_ORIGINAL)
     assert knowledge.recall("ship with vercel --prod --yes")
+
+
+class _AxisEmbedder:
+    """Test double. Phrases in the same axis are one concept; the model, not a
+    thesaurus, is what makes those phrases neighbors."""
+
+    model_id = "test-axis"
+
+    def __init__(self, axes: tuple[tuple[str, ...], ...]):
+        self.axes = axes
+        self.texts: list[str] = []
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.texts.extend(texts)
+        out: list[list[float]] = []
+        width = len(self.axes) + 256
+        for text in texts:
+            low = text.lower()
+            vec = [0.0] * width
+            hit = False
+            for index, phrases in enumerate(self.axes):
+                if any(phrase in low for phrase in phrases):
+                    vec[index] = 1.0
+                    hit = True
+            if not hit:
+                slot = int.from_bytes(hashlib.sha256(low.encode()).digest()[:2], "little") % 256
+                vec[len(self.axes) + slot] = 1.0
+            out.append(vec)
+        return out
+
+
+def test_a_paraphrase_with_no_shared_words_still_finds_the_note(tmp_path, monkeypatch):
+    """Agents ask with words that are not in the note. Porter cannot help.
+    A hand list of those words cannot either — the next question will use
+    different ones."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.set_embedder(_AxisEmbedder((
+        ("ready to run", "workers went status=active"),
+    )))
+    knowledge.learn(
+        "workers went status=active after the reboot",
+        title="Fleet came back",
+    )
+    knowledge.learn(
+        "the invoice template uses a serif font",
+        title="Invoice font",
+    )
+    titles = [hit[0] for hit in knowledge.recall("is the pipeline ready to run")]
+    assert titles[0] == "Fleet came back"
+    assert "Invoice font" not in titles
+
+
+def test_without_an_embedder_a_paraphrase_is_not_invented(tmp_path, monkeypatch):
+    """No model means no semantic channel. Recall must not pretend a fixed
+    word list knows what the agent meant."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.learn(
+        "workers went status=active after the reboot",
+        title="Fleet came back",
+    )
+    assert knowledge.recall("is the pipeline ready to run") == []
+
+
+def test_a_paraphrase_outranks_a_generic_word_overlap(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+
+    class Fixed:
+        model_id = "fixed-tie"
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            out: list[list[float]] = []
+            for text in texts:
+                low = text.lower()
+                if "current status" in low or "workers went" in low:
+                    out.append([1.0, 0.0])
+                else:
+                    out.append([0.0, 1.0])
+            return out
+
+    knowledge.set_embedder(Fixed())
+    knowledge.learn(
+        "the remote is currently an auth status problem for auto-lazyapply",
+        title="Auth status",
+    )
+    knowledge.learn(
+        "workers went status=active after the reboot",
+        title="Fleet came back",
+    )
+    titles = [hit[0] for hit in knowledge.recall("auto-apply current status")]
+    assert titles[0] == "Fleet came back"
+
+
+def test_an_identifier_keeps_the_lexical_hit(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+
+    class Fixed:
+        model_id = "fixed-id"
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            out: list[list[float]] = []
+            for text in texts:
+                low = text.lower().strip()
+                if low == "job_queue_tab_not_found" or "workers went" in low:
+                    out.append([1.0, 0.0])
+                else:
+                    out.append([0.0, 1.0])
+            return out
+
+    knowledge.set_embedder(Fixed())
+    knowledge.learn(
+        "error JOB_QUEUE_TAB_NOT_FOUND means the tab was never claimed",
+        title="Tab missing",
+    )
+    knowledge.learn(
+        "workers went status=active after the reboot",
+        title="Fleet came back",
+    )
+    titles = [hit[0] for hit in knowledge.recall("JOB_QUEUE_TAB_NOT_FOUND")]
+    assert titles[0] == "Tab missing"
+
+
+def test_a_close_paraphrase_clears_the_similarity_floor(tmp_path, monkeypatch):
+    """Neighbors are not identical vectors. The floor has to keep a paraphrase
+    that scores under 1 and drop an orthogonal note."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+
+    class Fixed:
+        model_id = "fixed"
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            out: list[list[float]] = []
+            for text in texts:
+                low = text.lower()
+                if "ready to run" in low:
+                    out.append([1.0, 0.0])
+                elif "workers went" in low:
+                    out.append([0.80, 0.60])
+                else:
+                    out.append([0.0, 1.0])
+            return out
+
+    knowledge.set_embedder(Fixed())
+    knowledge.learn("workers went status=active after the reboot", title="Fleet came back")
+    knowledge.learn("the invoice template uses a serif font", title="Invoice font")
+    titles = [hit[0] for hit in knowledge.recall("is the pipeline ready to run")]
+    assert titles[0] == "Fleet came back"
+    assert "Invoice font" not in titles
+
+
+def test_a_weak_neighbor_does_not_outrank_the_lexical_hit(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.set_embedder(_AxisEmbedder((
+        ("ready to run",),
+        ("serif invoice",),
+    )))
+    knowledge.learn("the invoice template uses a serif font", title="Invoice font")
+    knowledge.learn("ship with vercel --prod --yes", title="Vercel marker")
+    titles = [hit[0] for hit in knowledge.recall("ship with vercel --prod --yes")]
+    assert titles[0] == "Vercel marker"
+    assert "Invoice font" not in [hit[0] for hit in knowledge.recall("is the pipeline ready to run")]
+
+
+def test_reindex_embeds_a_note_once_until_it_changes(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    embedder = _AxisEmbedder((("alpha-signal",), ("beta-signal",)))
+    knowledge.set_embedder(embedder)
+    knowledge.learn("alpha-signal is the first fact", title="First")
+    knowledge.learn("beta-signal is the second fact", title="Second")
+    alpha = [text for text in embedder.texts if "alpha-signal" in text.lower()]
+    assert len(alpha) == 1
+
+
+def test_a_broken_embedder_leaves_lexical_recall_working(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+
+    class Boom:
+        model_id = "boom"
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            raise RuntimeError("model exploded")
+
+    knowledge.set_embedder(Boom())
+    _, action = knowledge.learn("vercel marker lives here", title="Vercel marker")
+    assert action == "created"
+    hits = knowledge.recall("vercel marker")
+    assert hits and hits[0][0] == "Vercel marker"
+    assert "exploded" in knowledge.stats()["semantic"]
+
+
+def test_recall_ranks_a_paraphrase_ahead_of_a_shared_word_from_elsewhere(
+        tmp_path, monkeypatch):
+    """The word an agent used may also appear in an unrelated note. The note
+    that is actually about the question ranks first."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.set_embedder(_AxisEmbedder((
+        ("auto-apply readiness", "workers went status=active"),
+    )))
+    knowledge.learn(
+        "auto-lazyapply workers went status=active after reboot",
+        title="Fleet status",
+        tags=["auto-lazyapply"],
+    )
+    knowledge.learn(
+        "Index readiness gate fixed for the retrieval baseline",
+        title="Index readiness",
+        tags=["briopedia"],
+    )
+    knowledge.learn(
+        "the mail channel status is healthy after the tick",
+        title="Mail status",
+        tags=["email"],
+    )
+    titles = [hit[0] for hit in knowledge.recall("auto-apply readiness")]
+    assert titles[0] == "Fleet status"
+    assert "Mail status" not in titles
+
+
+def test_a_single_alias_finds_the_other_name(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.learn(
+        "job-autofill renders the template before send",
+        title="Template render",
+        tags=["job-autofill"],
+    )
+    titles = [hit[0] for hit in knowledge.recall("auto-apply")]
+    assert "Template render" in titles
+
+
+def test_a_single_generic_word_does_not_expand_into_synonyms(tmp_path, monkeypatch):
+    """status/health are contextual. Unfolding them for a one-word query would
+    return half the store."""
+    _isolate(tmp_path, monkeypatch)
+    from brain import knowledge
+    knowledge.learn("the mail channel status is healthy after the tick", title="Mail status")
+    titles = [hit[0] for hit in knowledge.recall("readiness")]
+    assert "Mail status" not in titles
 
 
 def test_same_title_edits_in_place_rather_than_forking(tmp_path, monkeypatch):

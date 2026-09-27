@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
+from . import embed as dense
 
 NOTES_DIRNAME = "notes"
 
@@ -36,6 +37,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notes USING fts5(
     tokenize = "porter unicode61"
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS vectors (
+    slug TEXT PRIMARY KEY,
+    digest TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vec BLOB NOT NULL
+);
 """
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
@@ -146,10 +153,11 @@ def get_note(slug_or_title: str) -> Note | None:
 def reindex() -> int:
     """Rebuild the search index from the markdown. Safe to run anytime —
     it only ever drops the DERIVED index, never a note."""
+    notes = all_notes()
     con = connect()
     with con:
         con.execute("DELETE FROM notes")
-        for note in all_notes():
+        for note in notes:
             con.execute(
                 "INSERT INTO notes (slug,title,tags,body,path,updated) VALUES (?,?,?,?,?,?)",
                 (note.slug, note.title, " ".join(note.tags), note.body,
@@ -159,6 +167,8 @@ def reindex() -> int:
             "INSERT OR REPLACE INTO meta (key,value) VALUES ('reindexed',?)",
             (dt.datetime.now().isoformat(timespec="seconds"),),
         )
+    _sync_vectors(con, notes)
+    con.commit()
     count = con.execute("SELECT count(*) FROM notes").fetchone()[0]
     con.close()
     return count
@@ -233,6 +243,22 @@ STOPWORDS = {
     "on", "for", "with", "that", "this", "it", "as", "at", "by", "from", "not",
 }
 
+# Proper-name renames. Porter and a general embedding model both miss these:
+# "auto-lazyapply" and "auto-apply" are not paraphrases, they are two names.
+_ALIAS_GROUPS = (
+    frozenset({"auto-apply", "auto-lazyapply", "lazyapply", "job-autofill", "autofill"}),
+    frozenset({"workday", "my-experience", "myexperience"}),
+)
+
+
+def _index_groups(groups: tuple[frozenset[str], ...]) -> dict[str, frozenset[str]]:
+    return {word: group for group in groups for word in group}
+
+
+ALIASES = _index_groups(_ALIAS_GROUPS)
+
+_FTS_SYNTAX = re.compile(r"\b(?:AND|OR|NOT|NEAR)\b|[:\"()]")
+
 SELECT = ("SELECT title, snippet(notes, 3, '«', '»', ' … ', 18), path "
           "FROM notes WHERE notes MATCH ? ORDER BY rank LIMIT ?")
 
@@ -256,9 +282,36 @@ def terms(text: str, limit: int = 12) -> list[str]:
     return out[:limit]
 
 
+def _quote_term(word: str) -> str:
+    """Quote so a hyphen is a literal. Unquoted, `auto-apply` is `auto NOT apply`."""
+    return '"' + word.replace('"', "") + '"'
+
+
 def _fts_or(words: list[str]) -> str:
-    """Quote every term so hyphens and dots are literals, not operators."""
-    return " OR ".join('"' + w.replace('"', "") + '"' for w in words)
+    return " OR ".join(_quote_term(word) for word in words)
+
+
+def _expanded(words: list[str]) -> list[str]:
+    """Alias members count as the same term. Order is stable for the query string."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for word in words:
+        for item in sorted(ALIASES.get(word, frozenset({word}))):
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+    return out
+
+
+def _clause(word: str) -> str:
+    group = ALIASES.get(word)
+    if not group:
+        return _quote_term(word)
+    return "(" + " OR ".join(_quote_term(item) for item in sorted(group)) + ")"
+
+
+def _and_query(words: list[str]) -> str:
+    return " AND ".join(_clause(word) for word in words)
 
 
 def _match(con, expression: str, limit: int) -> list[tuple[str, str, str]]:
@@ -268,33 +321,178 @@ def _match(con, expression: str, limit: int) -> list[tuple[str, str, str]]:
         return []
 
 
-def recall(query: str, limit: int = 10) -> list[tuple[str, str, str]]:
-    """Full-text search. Returns (title, snippet, path).
+def _identifier_query(query: str) -> bool:
+    """Error codes and ids should not lose to a paraphrase."""
+    for word in terms(query):
+        if any(char.isdigit() or char == "_" for char in word):
+            return True
+    return False
 
-    On a thin result set, retry with the terms OR'd. FTS5 will not match a
-    paraphrase, and the symptom is not slowness — it is an agent reading zero
-    rows as "nothing is known" and writing a near-duplicate. Widening on a miss
-    is the cheap half of the fix; deliberate tags are the other half.
+
+def _lexical_and(con, query: str, limit: int) -> list[tuple[str, str, str]]:
+    """Every distinctive term must hit. Alias groups count as one term."""
+    if _FTS_SYNTAX.search(query):
+        return _match(con, query, limit)
+    words = terms(query)
+    if not words:
+        return []
+    return _match(con, _and_query(words), limit)
+
+
+def _lexical_or(con, query: str, limit: int) -> list[tuple[str, str, str]]:
+    """Last resort. Any term, aliases included. Used only when AND and
+    semantic search both missed, so one shared word cannot outrank a hit."""
+    if _FTS_SYNTAX.search(query):
+        return []
+    words = terms(query)
+    if not words:
+        return _match(con, _quote_term(query), limit)
+    rows = _match(con, _fts_or(_expanded(words)), limit)
+    if not rows:
+        rows = _match(con, _quote_term(query), limit)
+    return rows
+
+
+def _vector_source(note: Note) -> str:
+    return f"{note.title}\n{' '.join(note.tags)}\n{note.body}".strip()[:2000]
+
+
+def _vector_digest(note: Note) -> str:
+    return hashlib.sha256(_vector_source(note).encode()).hexdigest()[:16]
+
+
+def _record_embed_error(con, exc: BaseException) -> None:
+    dense.embed_error = f"{type(exc).__name__}: {exc}"
+    con.execute(
+        "INSERT OR REPLACE INTO meta (key,value) VALUES ('embed_error',?)",
+        (dense.embed_error,),
+    )
+    con.commit()
+
+
+def _clear_embed_error(con) -> None:
+    dense.embed_error = ""
+    con.execute("DELETE FROM meta WHERE key='embed_error'")
+    con.commit()
+
+
+def _sync_vectors(con, notes: list[Note]) -> None:
+    """Embed notes whose text changed. A model failure stays in meta and
+    leaves the lexical index in place."""
+    embedder = dense.get_embedder()
+    if embedder is None:
+        return
+    model = getattr(embedder, "model_id", type(embedder).__name__)
+    previous = con.execute("SELECT value FROM meta WHERE key='embed_model'").fetchone()
+    have: dict[str, str] = {}
+    if previous is not None and previous[0] == model:
+        have = {row[0]: row[1] for row in con.execute("SELECT slug, digest FROM vectors")}
+    else:
+        con.execute("DELETE FROM vectors")
+    live = {note.slug: note for note in notes}
+    for slug in list(have):
+        if slug not in live:
+            con.execute("DELETE FROM vectors WHERE slug=?", (slug,))
+    stale = [note for note in notes if have.get(note.slug) != _vector_digest(note)]
+    if not stale:
+        con.execute(
+            "INSERT OR REPLACE INTO meta (key,value) VALUES ('embed_model',?)",
+            (model,),
+        )
+        _clear_embed_error(con)
+        return
+    try:
+        vecs = embedder.embed([_vector_source(note) for note in stale])
+    except Exception as exc:
+        _record_embed_error(con, exc)
+        return
+    if len(vecs) != len(stale):
+        _record_embed_error(con, RuntimeError(
+            f"embedder returned {len(vecs)} vectors for {len(stale)} notes"))
+        return
+    for note, vec in zip(stale, vecs):
+        if not vec:
+            _record_embed_error(con, RuntimeError(f"empty vector for {note.slug}"))
+            return
+        con.execute(
+            "INSERT OR REPLACE INTO vectors (slug,digest,dim,vec) VALUES (?,?,?,?)",
+            (note.slug, _vector_digest(note), len(vec), dense.pack(vec)),
+        )
+    con.execute(
+        "INSERT OR REPLACE INTO meta (key,value) VALUES ('embed_model',?)",
+        (model,),
+    )
+    _clear_embed_error(con)
+
+
+def _clip(body: str) -> str:
+    text = " ".join(body.split())
+    return text[:180] + ("…" if len(text) > 180 else "")
+
+
+def _semantic(con, query: str, limit: int) -> list[tuple[str, str, str]]:
+    embedder = dense.get_embedder()
+    if embedder is None:
+        return []
+    stored = con.execute("SELECT slug, dim, vec FROM vectors").fetchall()
+    if not stored:
+        return []
+    try:
+        query_vec = embedder.embed([query])[0]
+    except Exception as exc:
+        _record_embed_error(con, exc)
+        return []
+    scored: list[tuple[float, str]] = []
+    for slug, dim, blob in stored:
+        similarity = dense.cosine(query_vec, dense.unpack(blob, dim))
+        if similarity >= dense.MIN_COSINE:
+            scored.append((similarity, slug))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if not scored:
+        return []
+    best = scored[0][0]
+    cutoff = max(dense.MIN_COSINE, best - dense.MARGIN)
+    scored = [item for item in scored if item[0] >= cutoff]
+    rows: list[tuple[str, str, str]] = []
+    for _similarity, slug in scored[:limit]:
+        found = con.execute(
+            "SELECT title, body, path FROM notes WHERE slug=? LIMIT 1",
+            (slug,),
+        ).fetchone()
+        if found is None:
+            continue
+        title, body, path = found
+        rows.append((title, _clip(body), path))
+    _clear_embed_error(con)
+    return rows
+
+
+def recall(query: str, limit: int = 10) -> list[tuple[str, str, str]]:
+    """Search notes. Returns (title, snippet, path).
+
+    Lexical: FTS5 + Porter, plus proper-name aliases (auto-apply /
+    auto-lazyapply, workday / my-experience). That AND is fused with
+    semantic hits. A flat OR runs only when both missed, so a note that
+    merely shares one word cannot outrank the paraphrase.
     """
+    pool = max(limit, 20)
     con = connect()
     try:
-        rows = _match(con, query, limit)
-        if len(rows) < 3:
-            words = terms(query)
-            if words:
-                widened = _match(con, _fts_or(words), limit)
-                seen = {r[2] for r in rows}
-                rows += [r for r in widened if r[2] not in seen]
-        if not rows:
-            rows = _match(con, '"' + query.replace('"', "") + '"', limit)
+        strict = _lexical_and(con, query, pool)
+        semantic = _semantic(con, query, pool)
+        if strict or semantic:
+            if semantic:
+                return dense.rrf(
+                    [strict, semantic], limit, prefer_lexical=_identifier_query(query),
+                )
+            return strict[:limit]
+        return _lexical_or(con, query, limit)[:limit]
     finally:
         con.close()
-    return rows[:limit]
 
 
 def all_tags() -> dict[str, int]:
-    """Tags in use, with counts. A closed vocabulary is the semantic bridge
-    that FTS5 cannot give you and embeddings would be overkill for."""
+    """Tags in use, with counts. Reuse one before inventing a new one."""
     counts: dict[str, int] = {}
     for note in all_notes():
         for tag in note.tags:
@@ -343,10 +541,23 @@ def stats() -> dict[str, str]:
     con = connect()
     count = con.execute("SELECT count(*) FROM notes").fetchone()[0]
     row = con.execute("SELECT value FROM meta WHERE key='reindexed'").fetchone()
+    err = con.execute("SELECT value FROM meta WHERE key='embed_error'").fetchone()
+    vectors = con.execute("SELECT count(*) FROM vectors").fetchone()[0]
     con.close()
+    if err is not None:
+        semantic = err[0]
+    elif dense.get_embedder() is None:
+        semantic = "off"
+    else:
+        semantic = f"on · {vectors} vectors"
     return {
         "notes": str(count),
         "indexed": row[0] if row else "never",
+        "semantic": semantic,
         "dir": str(notes_dir()),
         "index": str(db_path()),
     }
+
+
+def set_embedder(embedder: dense.Embedder | None) -> None:
+    dense.set_embedder(embedder)

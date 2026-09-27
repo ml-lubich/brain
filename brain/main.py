@@ -402,7 +402,9 @@ def list_cmd(
 @app.command()
 def reindex() -> None:
     """Rebuild the search index from the markdown. Safe — notes are untouched."""
-    console.print(f"indexed [green]{knowledge.reindex()}[/green] notes")
+    count = knowledge.reindex()
+    semantic = knowledge.stats()["semantic"]
+    console.print(f"indexed [green]{count}[/green] notes · semantic {semantic}")
 
 
 @app.command("sync")
@@ -491,8 +493,7 @@ def health() -> None:
 
 @app.command()
 def tags() -> None:
-    """Tags already in use. Reuse one before inventing a new one — a closed
-    vocabulary is what makes recall work without embeddings."""
+    """Tags already in use. Reuse one before inventing a new one."""
     counts = knowledge.all_tags()
     if not counts:
         console.print("[dim]no tags yet[/dim]")

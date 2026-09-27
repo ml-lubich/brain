@@ -55,6 +55,16 @@ brain install                 # write + load the launchd agents
 | `brain install` / `uninstall` | Manage the launchd agents. |
 | `brain log [n]` | Tail the activity log. |
 
+## Recall
+
+`brain recall` is hybrid search.
+
+- **Lexical.** SQLite FTS5 with the Porter stemmer (`ready`/`readiness`, `apply`/`applying`). Proper-name aliases expand too (`auto-apply` / `auto-lazyapply` / `job-autofill`, `workday` / `my-experience`), because those are renames, not paraphrases. Every distinctive word has to match.
+- **Semantic.** Cosine similarity over one vector per note. The model is `mlx-community/bge-small-en-v1.5-4bit` via `mlx-embeddings` (`uv tool install -e '.[embed]'`). `BRAIN_EMBED=0` turns it off. Agents ask with words that are not in the note; that is what this channel is for. There is no hand-maintained thesaurus of those words. Hits have to clear a floor and sit near the best match, so a vaguely similar note does not fill the list.
+- **Fusion.** Reciprocal rank fusion of the two lists. A flat OR of the original words runs only when both channels miss, so a note that merely shares one word does not outrank the paraphrase.
+
+`brain reindex` rebuilds both indexes from the markdown. `brain learn` updates them. A model failure is recorded in `brain knowledge` under `semantic` and lexical search keeps working.
+
 ## Adding a channel
 
 Drop one module in `brain/channels/`. Discovery is automatic — no registry to
