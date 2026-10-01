@@ -375,3 +375,29 @@ def test_cli_list_command(tmp_path, monkeypatch):
     assert len(data) == 1
     assert data[0]["title"] == "Alpha Notes"
 
+
+def test_cli_recall_with_sessions(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from typer.testing import CliRunner
+    from brain.main import app
+
+    agy_dir = tmp_path / "sess" / ".system_generated" / "logs"
+    agy_dir.mkdir(parents=True)
+    (agy_dir / "transcript.jsonl").write_text('{"step_index":0,"source":"USER_EXPLICIT","content":"deploying vercel with prod flag"}')
+
+    monkeypatch.setattr("brain.sessions.default_session_roots", lambda: [tmp_path])
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["recall", "vercel", "--sessions", "--json"])
+    assert res.exit_code == 0
+    data = json.loads(res.stdout)
+    assert "sessions" in data
+    assert len(data["sessions"]) >= 1
+    assert data["sessions"][0]["session_type"] == "antigravity"
+
+    res_cmd = runner.invoke(app, ["sessions", "vercel", "--json"])
+    assert res_cmd.exit_code == 0
+    cmd_data = json.loads(res_cmd.stdout)
+    assert len(cmd_data) >= 1
+    assert cmd_data[0]["session_type"] == "antigravity"
+

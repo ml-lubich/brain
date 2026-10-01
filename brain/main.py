@@ -319,29 +319,96 @@ def learn(
 def recall(
     query: str = typer.Argument(..., help="Full-text search over everything learned."),
     limit: int = typer.Option(10, "--limit", "-n"),
+    sessions: bool = typer.Option(False, "--sessions", "-s", help="Also search multi-agent session logs (AGY, Codex, Claude, etc)."),
     json_out: bool = typer.Option(False, "--json", help="Output results as JSON for agents."),
 ) -> None:
     """Search the knowledge index."""
     import json as _json
 
     rows = knowledge.recall(query, limit)
+    sess_matches = []
+    if sessions:
+        from . import sessions as _sess
+        sess_matches = _sess.search_sessions(query, limit=limit)
+
     if json_out:
-        results = []
-        for title, snippet, path in rows:
-            results.append({
-                "title": title,
-                "snippet": snippet,
-                "path": str(path),
-                "slug": Path(path).stem,
-            })
-        print(_json.dumps(results, indent=2))
+        if sessions:
+            results = {
+                "notes": [
+                    {
+                        "title": title,
+                        "snippet": snippet,
+                        "path": str(path),
+                        "slug": Path(path).stem,
+                    }
+                    for title, snippet, path in rows
+                ],
+                "sessions": [
+                    {
+                        "session_id": s.session_id,
+                        "session_type": s.session_type,
+                        "snippet": s.snippet,
+                        "path": str(s.path),
+                    }
+                    for s in sess_matches
+                ],
+            }
+            print(_json.dumps(results, indent=2))
+        else:
+            results = [
+                {
+                    "title": title,
+                    "snippet": snippet,
+                    "path": str(path),
+                    "slug": Path(path).stem,
+                }
+                for title, snippet, path in rows
+            ]
+            print(_json.dumps(results, indent=2))
         return
 
-    if not rows:
+    if not rows and not sess_matches:
         console.print(f"[dim]nothing for {query!r} ({knowledge.stats()['notes']} notes indexed)[/dim]")
         return
+
     for title, snippet, path in rows:
         console.print(f"[bold]{title}[/bold]\n  {snippet}\n  [dim]{path}[/dim]\n")
+
+    if sess_matches:
+        console.print(f"\n[bold cyan]── Sessions ({len(sess_matches)}) ──[/bold cyan]")
+        for s in sess_matches:
+            console.print(f"[{s.session_type.upper()}] [bold]{s.session_id}[/bold]\n  {s.snippet}\n  [dim]{s.path}[/dim]\n")
+
+
+@app.command(name="sessions")
+def search_sessions_cmd(
+    query: str = typer.Argument(..., help="Search query across all agent session transcripts."),
+    limit: int = typer.Option(20, "--limit", "-n"),
+    json_out: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Search multi-agent session transcripts (Antigravity, Codex, Claude, etc.)."""
+    import json as _json
+    from . import sessions as _sess
+
+    matches = _sess.search_sessions(query, limit=limit)
+    if json_out:
+        print(_json.dumps([
+            {
+                "session_id": s.session_id,
+                "session_type": s.session_type,
+                "snippet": s.snippet,
+                "path": str(s.path),
+            }
+            for s in matches
+        ], indent=2))
+        return
+
+    if not matches:
+        console.print(f"[dim]no session transcripts matched {query!r}[/dim]")
+        return
+
+    for s in matches:
+        console.print(f"[{s.session_type.upper()}] [bold]{s.session_id}[/bold]\n  {s.snippet}\n  [dim]{s.path}[/dim]\n")
 
 
 @app.command()
