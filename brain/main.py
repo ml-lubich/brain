@@ -17,6 +17,7 @@ app = typer.Typer(
     no_args_is_help=True,
     help="brain — wakes headless Claude when a channel changes, drafts replies, "
          "queues them for approval. Never sends on its own.",
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 console = Console()
 

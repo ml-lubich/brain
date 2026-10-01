@@ -401,3 +401,15 @@ def test_cli_recall_with_sessions(tmp_path, monkeypatch):
     assert len(cmd_data) >= 1
     assert cmd_data[0]["session_type"] == "antigravity"
 
+
+def test_help_short_flag_on_root_and_subcommands(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from typer.testing import CliRunner
+    from brain.main import app
+
+    runner = CliRunner()
+    for args in (["-h"], ["--help"], ["learn", "-h"], ["recall", "-h"], ["tick", "-h"]):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, (args, result.output)
+        assert "Usage" in result.output
+
